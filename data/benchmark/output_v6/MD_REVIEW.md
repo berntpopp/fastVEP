@@ -34,24 +34,94 @@ cases by:
    side = more confident classifier disagreement = stronger candidate
    for re-curation.
 
-Columns: `priority_score, chrom, pos, ref, alt, gene, stars, rcv,
-truth_class, fastvep_class, consequence, n_criteria, met_criteria,
-review_question`.
+Built by `analysis/acmg_benchmark/real_data/04_build_md_review_table.py`
+which joins three sources:
+
+- `data/benchmark/output_v6/discrepancies.tsv` — the raw concordance
+  output
+- `data/benchmark/clinvar_2star.vcf` — for the full ClinVar INFO
+- `data/benchmark/output_v6/opposite_direction.fastvep.vcf` — a
+  re-annotation of the 112 discrepancy variants with `--hgvs` so the
+  HGVSc / HGVSp fields are populated (the full-benchmark VCF.gz omits
+  HGVS to stay small)
+
+### TSV columns (43 total)
+
+**Identity / scoring (7 columns)**
+
+| Column | Description |
+|--------|-------------|
+| `priority_score` | sorted descending; higher = more reviewable |
+| `chrom`, `pos`, `ref`, `alt` | GRCh38 coordinates (un-prefixed chrom) |
+| `gene` | ClinVar's primary gene symbol |
+| `stars` | ClinVar review-status star level (2 or 3) |
+
+**Classification (5 columns)**
+
+| Column | Description |
+|--------|-------------|
+| `truth_class` | ClinVar normalised class (Pathogenic / Likely_pathogenic / Likely_benign / Benign) |
+| `fastvep_class` | fastVEP ACMG-AMP call (P / LP / LB / B) |
+| `n_criteria_met` | count of fastVEP criteria that fired |
+| `fastvep_met_criteria` | semicolon-separated criterion codes (e.g. `PS1;BS2;BP4`) |
+| `consequence_top` | top SO term from VEP picked transcript |
+
+**ClinVar INFO fields (16 columns, prefixed `clinvar_`)**
+
+| Column | Description |
+|--------|-------------|
+| `clinvar_ALLELEID` | ClinVar Allele identifier |
+| `clinvar_CLNHGVS` | top-level HGVS expression (e.g. `NC_000002.12:g.26463969C>G`) |
+| `clinvar_CLNDN` | preferred disease name(s), pipe-separated per assertion |
+| `clinvar_CLNDISDB` | disease-database tag-value pairs (MedGen, OMIM, Orphanet, MONDO) |
+| `clinvar_CLNREVSTAT` | review status (`reviewed_by_expert_panel`, `criteria_provided,_multiple_submitters,_no_conflicts`, etc.) |
+| `clinvar_CLNSIG` | significance (`Pathogenic`, `Likely_benign`, etc.) |
+| `clinvar_CLNSIGCONF` | conflicting-significance details when present |
+| `clinvar_CLNSIGSCV` | SCV accession of the panel call |
+| `clinvar_CLNVC` | variant class (single_nucleotide_variant, etc.) |
+| `clinvar_CLNVI` | external identifier list (ClinGen CA-id, OMIM, UniProt, etc.) |
+| `clinvar_GENEINFO` | gene symbol(s) + Entrez ID at this position |
+| `clinvar_MC` | molecular-consequence SO term(s) |
+| `clinvar_ORIGIN` | allele origin code (germline / somatic / etc.) |
+| `clinvar_AF_EXAC`, `clinvar_AF_TGP`, `clinvar_AF_ESP` | older population AFs from ClinVar's frozen sources |
+
+**fastVEP CSQ fields (14 columns, prefixed `fastvep_`)**
+
+| Column | Description |
+|--------|-------------|
+| `fastvep_HGVSc` | coding-sequence HGVS on the picked transcript |
+| `fastvep_HGVSp` | protein HGVS on the picked transcript |
+| `fastvep_BIOTYPE` | transcript biotype (protein_coding, lncRNA, etc.) |
+| `fastvep_EXON` / `fastvep_INTRON` | feature/total |
+| `fastvep_MANE_SELECT` | MANE Select transcript ID when available |
+| `fastvep_CANONICAL` | YES if Ensembl canonical |
+| `fastvep_ENSP` | Ensembl protein ID |
+| `fastvep_CCDS` | CCDS identifier |
+| `fastvep_HGNC_ID` | HGNC numeric ID (empty unless an HGNC xref source is loaded) |
+| `fastvep_SIFT` / `fastvep_PolyPhen` | empty unless dbNSFP `.osa` loaded |
+| `fastvep_ACMG` | predicted classification short code (P / LP / VUS / LB / B) |
+| `fastvep_ACMG_CRITERIA` | `&`-joined met criteria codes |
+
+**Helper (1 column)**
+
+| Column | Description |
+|--------|-------------|
+| `review_question` | pre-formatted prompt: "Why does fastVEP call X when ClinVar says Y? Inspect: <HGVS>; criteria fired = <list>" |
 
 ## Top 7 (3-star expert-panel opposite calls)
 
 These are the **highest-priority** cases — the ClinVar review-panel
 call is from a Variant Curation Expert Panel.
 
-| # | Gene | Variant | ClinVar (3-star) | fastVEP | Criteria fired | Review hypothesis |
-|---|------|---------|------------------|---------|----------------|-------------------|
-| 1 | **OTOF**  | chr2:26463969 C>G  | Pathogenic | LB | PS1, BS2, BP4 | Same-AA-as-known-pathogenic + healthy-homozygote conflict. Likely a hypomorphic allele where heterozygotes are healthy but compound-het with another pathogenic allele causes auditory neuropathy. ACMG combiner correctly hits VUS-conflicting; ClinVar's panel has functional/segregation evidence we don't have. |
-| 2 | **CYP1B1** | chr2:38075207 C>T | Pathogenic | LB | PS1, BS2, BP4 | Same pattern as OTOF — known pathogenic-by-AA but observed in healthy homozygotes. Recessive primary congenital glaucoma; this is OMIM 601771.0003. Clinical variability is well-documented. Re-evaluate whether BS2 should be silenced for genes where homozygous healthy adults *can* exist (incomplete penetrance). |
-| 3 | **SCN2A**  | chr2:165344715 A>G | **Benign** | **LP** | PM1, PM2_Supporting, PM5, PP2, BP4 | Five criteria all firing in the pathogenic direction (with BP4 from REVEL ≤ 0.290). ClinVar says benign. **This is the strongest classifier-disagrees-with-panel case.** Worth checking the actual ClinVar submission rationale — possible that the variant is in a benign domain despite the hotspot context. |
-| 4 | **MSH2**   | chr2:47416297 G>A | Likely Benign | LP | PS1, PM1, BP4 | Lynch syndrome locus — same-AA-as-pathogenic call. ClinVar has hypothesized hypomorphic / VUS reclassification; check current InSiGHT classification. |
-| 5 | **MYOC**   | chr1:171652476 G>A | Likely Benign | LP | PVS1, PM2_Supporting | Stop_gained in MYOC (juvenile open-angle glaucoma, OMIM 601652). PVS1+PM2 → LP per ClinGen SVI rule. Glaucoma panel may have downgraded based on incomplete penetrance / variable expressivity in healthy elderly. Worth checking gene-specific PVS1 calibration (is MYOC truly haploinsufficient?). |
-| 6 | **MSH6**   | chr2:47806652 GTAAC>G | Likely Benign | LP | PVS1, PM2_Supporting | Splice donor variant in Lynch-syndrome locus. PVS1 fires on canonical splice. Likely a panel re-classification based on RNA studies showing tolerated transcript or in-frame skip. |
-| 7 | **MSH6**   | chr2:47806842 T>TTTGA | Likely Benign | LP | PVS1, PM2_Supporting | Frameshift variant in MSH6. Same pattern — panel may have downgraded based on functional / segregation evidence. |
+| # | Gene | Variant | HGVSp | ClinVar (3*) | fastVEP | Criteria fired | Review hypothesis |
+|---|------|---------|-------|------------------|---------|----------------|-------------------|
+| 1 | **OTOF**  | chr2:26463969 C>G | p.Glu1700Gln | Pathogenic | LB | PS1, BS2, BP4 | Same-AA-as-known-pathogenic + healthy-homozygote conflict. Likely a hypomorphic allele where heterozygotes are healthy but compound-het with another pathogenic allele causes auditory neuropathy. ACMG combiner correctly hits VUS-conflicting; ClinVar's panel has functional/segregation evidence we don't have. |
+| 2 | **CYP1B1** | chr2:38075207 C>T | p.Gly61Glu | Pathogenic | LB | PS1, BS2, BP4 | Same pattern as OTOF — known pathogenic-by-AA but observed in healthy homozygotes. Recessive primary congenital glaucoma; this is OMIM 601771.0003. Clinical variability is well-documented. Re-evaluate whether BS2 should be silenced for genes where homozygous healthy adults *can* exist (incomplete penetrance). |
+| 3 | **SCN2A**  | chr2:165344715 A>G | p.Lys908Arg | **Benign** | **LP** | PM1, PM2_Supporting, PM5, PP2, BP4 | Five criteria all firing in the pathogenic direction (with BP4 from REVEL ≤ 0.290). ClinVar says benign. **This is the strongest classifier-disagrees-with-panel case.** Worth checking the actual ClinVar submission rationale — possible that the variant is in a benign domain despite the hotspot context. |
+| 4 | **MSH2**   | chr2:47416297 G>A | p.Gly315Val | Likely Benign | LP | PS1, PM1, BP4 | Lynch syndrome locus — same-AA-as-pathogenic call. ClinVar has hypothesized hypomorphic / VUS reclassification; check current InSiGHT classification. |
+| 5 | **MYOC**   | chr1:171652476 G>A | p.Arg46Ter | Likely Benign | LP | PVS1, PM2_Supporting | Stop_gained in MYOC (juvenile open-angle glaucoma, OMIM 601652). PVS1+PM2 → LP per ClinGen SVI rule. Glaucoma panel may have downgraded based on incomplete penetrance / variable expressivity in healthy elderly. Worth checking gene-specific PVS1 calibration (is MYOC truly haploinsufficient?). |
+| 6 | **MSH6**   | chr2:47806652 GTAAC>G | (splice) | Likely Benign | LP | PVS1, PM2_Supporting | Splice donor variant in Lynch-syndrome locus. PVS1 fires on canonical splice. Likely a panel re-classification based on RNA studies showing tolerated transcript or in-frame skip. |
+| 7 | **MSH6**   | chr2:47806842 T>TTTGA | p.Lys1358AspfsTer2 | Likely Benign | LP | PVS1, PM2_Supporting | Frameshift variant in MSH6. Same pattern — panel may have downgraded based on functional / segregation evidence. |
 
 ## Top 20 (all 2-star+ opposite-direction)
 

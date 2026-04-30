@@ -309,11 +309,11 @@ Outputs (`data/benchmark/output_v7/figures/`, PNG + PDF):
 | File | Content |
 |------|---------|
 | `fig_concordance_matrix` | row-normalised truth × predicted heatmap |
-| `fig_recall_by_class` | per-class outcome breakdown (same / off / NoCall / opposite) |
-| `fig_v1_vs_v7_recall` | per-class same-direction recall, v1 baseline vs v7 |
-| `fig_headline_v1_vs_v7` | headline metrics (exact / same-dir / opposite / NoCall) v1 vs v7 |
-| `fig_criterion_fires` | top-18 criteria by total fire count, stacked by truth class |
-| `fig_bp7_pvs1_delta` | single-criterion lift v1 → v7 for BP7, PVS1, PS1, BS2, BA1 |
+| `fig_outcome_breakdown` | per-truth-class stack: same-direction / VUS / NoCall / opposite |
+| `fig_criterion_fire_heatmap` | criterion × truth-class fire-rate heatmap. The core "which criteria are diagnostic for which class" diagnostic. |
+| `fig_criterion_signatures_by_class` | top-8 criterion signatures of *failed* calls per truth class (P / LP / LB / B), split by failure mode (→ VUS vs opposite-direction) |
+| `fig_lost_to_vus_signatures` | criterion patterns of P-truth → VUS and LP-truth → VUS — the dominant failure mode (PVS1 alone, PM2 alone, etc., where the partner-criterion gating prevents reaching LP) |
+| `fig_opposite_direction_signatures` | for the ~100 truly opposite-direction cases, the criterion signatures by reversal direction (P/LP-truth → B/LB-pred and the reverse) — directly maps the candidate set for medical-geneticist review |
 
 ### Run-to-run differences (v1 → v7)
 
@@ -349,7 +349,7 @@ Diagnosis of the lifts:
    gnomAD constraint path. v4 adds the ClinGen GDV `.oga` (2,419
    Definitive/Strong/Moderate genes) — preferred per Abou Tayoun 2018
    over the OMIM phenotype proxy. PVS1 fires went from 5,636 to 27,460
-   (4.9×); see `fig_bp7_pvs1_delta`.
+   (4.9×);.
 
 3. **NoCall artefact in v4 was an indel allele-matching bug** (v4 → v5
    fix). The 6.8 % NoCall rate in v4 looked like a `--pick` ↔

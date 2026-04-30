@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
-"""Real-data benchmark figures for the ClinVar 2-star+ evaluation.
+"""Diagnostic figures for the ClinVar 2-star+ benchmark.
 
-Reads outputs from `03_evaluate_concordance.py` (under
-`data/benchmark/output_v7/` by default) and emits 5 PDF/PNG panels
-under `<output_dir>/figures/`:
+Focuses on **which ACMG criteria fire for which classification outcome**,
+especially for discordant cases — rather than v1↔v7 baseline comparisons
+which are documented in METHODS.md / RUN_VERSIONS.md.
 
-  fig_concordance_matrix       row-normalised heatmap of truth × predicted
-  fig_recall_by_class          per-class same-direction recall (v7)
-  fig_v1_vs_v7_recall          paired bars showing the lift from loading
-                               PhyloP+SpliceAI+ClinGen GDV (the v1
-                               baseline is hard-coded from the prior run
-                               whose results are recorded in METHODS.md;
-                               it predates the SA-wiring fixes)
-  fig_criterion_fires          top criteria by total fire count (split
-                               by truth direction)
-  fig_bp7_pvs1_delta           the two single-criterion deltas that
-                               drove the recall lift
+Reads outputs from `03_evaluate_concordance.py` under
+`data/benchmark/output_v7/` (override via `argv[1]`) and emits the
+following figures under `<output_dir>/figures/`:
+
+  fig_concordance_matrix          row-normalised truth × predicted heatmap
+  fig_outcome_breakdown           per-truth-class outcome stack
+                                  (same / off / VUS / opposite)
+  fig_criterion_fire_heatmap      criterion × truth-class fire rate;
+                                  the core "which criteria are diagnostic
+                                  for which class" diagnostic
+  fig_criterion_signatures_by_class
+                                  top criterion combinations per truth
+                                  class, colored by predicted outcome
+  fig_lost_to_vus_signatures      criterion patterns of P/LP→VUS
+                                  variants — the dominant failure mode
+                                  driven by missing manual-curation
+                                  evidence (PS3 / PP1 / PP4)
+  fig_opposite_direction_signatures
+                                  for the ~100 opposite-direction cases,
+                                  the criterion patterns of
+                                  Pathogenic-truth→Benign-pred and the
+                                  reverse direction
 
 Usage:
   generate_figures.py                     # uses ../../data/benchmark/output_v7
@@ -25,26 +36,25 @@ Usage:
 from __future__ import annotations
 
 import csv
-import os
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.patches as mpatches  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 plt.rcParams.update(
     {
-        "font.size": 13,
-        "axes.titlesize": 17,
-        "axes.labelsize": 15,
-        "xtick.labelsize": 12,
-        "ytick.labelsize": 12,
-        "legend.fontsize": 12,
-        "legend.title_fontsize": 13,
+        "font.size": 12,
+        "axes.titlesize": 16,
+        "axes.labelsize": 14,
+        "xtick.labelsize": 11,
+        "ytick.labelsize": 11,
+        "legend.fontsize": 11,
+        "legend.title_fontsize": 12,
     }
 )
 
@@ -54,10 +64,9 @@ C = {
     "VUS": "#6b7280",
     "LB": "#3b82f6",
     "B": "#10b981",
-    "v1": "#94a3b8",
-    "v7": "#6c7aee",
     "delta_up": "#10b981",
     "delta_down": "#ef4444",
+    "neutral": "#94a3b8",
 }
 CLASSES = ["Pathogenic", "Likely_pathogenic", "VUS", "Likely_benign", "Benign"]
 CLASS_SHORT = {
@@ -67,50 +76,16 @@ CLASS_SHORT = {
     "Likely_benign": "LB",
     "Benign": "B",
 }
-CLASS_COLOR = {
-    "Pathogenic": C["P"],
-    "Likely_pathogenic": C["LP"],
-    "VUS": C["VUS"],
-    "Likely_benign": C["LB"],
-    "Benign": C["B"],
-}
+CLASS_COLOR = {c: C[CLASS_SHORT[c]] for c in CLASSES}
+
 
 # ──────────────────────────────────────────────────────────────────────
-# v1 baseline — measured on the same 673,660-variant ClinVar 2-star+ set
-# *before* PhyloP / SpliceAI / ClinGen GDV were loaded and before the
-# SpliceAI-camelCase / PhyloP-routing wiring fixes. Captured here so the
-# v1↔v7 comparison panel doesn't need a re-run of the prior pipeline.
-# Source: METHODS.md "Real-Data Concordance" section as written for v1.
+# data loaders
 # ──────────────────────────────────────────────────────────────────────
-V1_RECALL = {
-    "Pathogenic": 15.7,
-    "Likely_pathogenic": 20.9,
-    "VUS": 96.6,
-    "Likely_benign": 3.2,
-    "Benign": 33.2,
-}
-V1_HEADLINE = {
-    "exact_match": 52.7,
-    "same_direction": 54.7,
-    "opposite_direction": 0.005,
-    "no_call": 0.0,
-}
-# v1 BP7 fired 0 times; PVS1 fired 5,233 (Pathogenic) + 403 (LP) = 5,636.
-# Used in the BP7+PVS1 delta panel.
-V1_FIRES = {
-    "BP7": 0,
-    "PVS1": 5_233 + 403,
-    "PVS1_Supporting": 47 + 2,
-    "PS1": 9_068 + 3_240,
-    "BS2": 333 + 34 + 12_866 + 75_504,
-    "BA1": 1 + 874 + 41_183,
-}
-
 
 def read_matrix(out_dir: Path):
-    """Return a dict[(truth, predicted)] -> count from concordance_matrix.csv."""
     rows = list(csv.reader((out_dir / "concordance_matrix.csv").open()))
-    header = rows[0]  # ["truth"] + CLASSES + ["NoCall"]
+    header = rows[0]
     matrix = {}
     for row in rows[1:]:
         truth = row[0]
@@ -119,25 +94,7 @@ def read_matrix(out_dir: Path):
     return matrix
 
 
-def parse_summary(out_dir: Path) -> dict[str, float]:
-    """Pull headline metrics out of concordance_summary.txt."""
-    text = (out_dir / "concordance_summary.txt").read_text()
-    out = {}
-    for line in text.splitlines():
-        s = line.strip()
-        if s.startswith("Exact-match rate:"):
-            out["exact_match"] = float(s.split(":")[1].strip().rstrip("%"))
-        elif s.startswith("Same-direction rate:"):
-            out["same_direction"] = float(s.split(":")[1].strip().rstrip("%"))
-        elif s.startswith("Opposite-direction rate:"):
-            out["opposite_direction"] = float(s.split(":")[1].strip().rstrip("%"))
-        elif s.startswith("NoCall rate:"):
-            out["no_call"] = float(s.split(":")[1].strip().rstrip("%"))
-    return out
-
-
 def read_criterion_fires(out_dir: Path) -> dict[str, dict[str, int]]:
-    """Return {criterion: {Pathogenic: n, Likely_pathogenic: n, ...}}."""
     fires = {}
     with (out_dir / "criterion_firing_rates.csv").open() as f:
         rdr = csv.DictReader(f)
@@ -147,8 +104,26 @@ def read_criterion_fires(out_dir: Path) -> dict[str, dict[str, int]]:
     return fires
 
 
-def fig_concordance_matrix(matrix, out_dir: Path, fig_dir: Path):
-    fig, ax = plt.subplots(figsize=(11, 8))
+def read_discrepancies(out_dir: Path) -> list[dict[str, str]]:
+    out = []
+    with (out_dir / "discrepancies.tsv").open() as f:
+        rdr = csv.DictReader(f, delimiter="\t")
+        for row in rdr:
+            out.append(row)
+    return out
+
+
+def class_totals(matrix) -> dict[str, int]:
+    cols = CLASSES + ["NoCall"]
+    return {t: sum(matrix.get((t, c), 0) for c in cols) for t in CLASSES}
+
+
+# ──────────────────────────────────────────────────────────────────────
+# figures
+# ──────────────────────────────────────────────────────────────────────
+
+def fig_concordance_matrix(matrix, fig_dir: Path):
+    fig, ax = plt.subplots(figsize=(11, 7.5))
     cols = CLASSES + ["NoCall"]
     mat = np.zeros((len(CLASSES), len(cols)))
     for i, t in enumerate(CLASSES):
@@ -159,16 +134,13 @@ def fig_concordance_matrix(matrix, out_dir: Path, fig_dir: Path):
     im = ax.imshow(mat, cmap="YlOrRd", vmin=0, vmax=100, aspect="auto")
     ax.set_xticks(range(len(cols)))
     ax.set_xticklabels(
-        [CLASS_SHORT.get(c, c) for c in cols], fontsize=14, fontweight="bold"
+        [CLASS_SHORT.get(c, c) for c in cols], fontsize=13, fontweight="bold"
     )
     ax.set_yticks(range(len(CLASSES)))
-    ax.set_yticklabels([CLASS_SHORT[c] for c in CLASSES], fontsize=14, fontweight="bold")
+    ax.set_yticklabels([CLASS_SHORT[c] for c in CLASSES], fontsize=13, fontweight="bold")
     ax.set_xlabel("fastVEP predicted", fontweight="bold")
     ax.set_ylabel("ClinVar 2-star+ truth", fontweight="bold")
-    ax.set_title(
-        "ACMG concordance matrix (row-normalised %, full SA stack)",
-        fontweight="bold",
-    )
+    ax.set_title("ACMG concordance matrix (row-normalised %)", fontweight="bold")
 
     for i, t in enumerate(CLASSES):
         row_total = sum(matrix.get((t, c), 0) for c in cols)
@@ -178,20 +150,13 @@ def fig_concordance_matrix(matrix, out_dir: Path, fig_dir: Path):
             color = "white" if pct > 50 else "black"
             label = f"{cnt:,}\n({pct:.0f}%)"
             ax.text(
-                j,
-                i,
-                label,
-                ha="center",
-                va="center",
-                fontsize=11,
-                color=color,
-                fontweight="bold" if cols[j] == t else "normal",
+                j, i, label, ha="center", va="center", fontsize=10,
+                color=color, fontweight="bold" if cols[j] == t else "normal",
             )
-        # diagonal frame
         if i < len(cols):
             ax.add_patch(
                 plt.Rectangle(
-                    (i - 0.5, i - 0.5), 1, 1, fill=False, edgecolor=C["delta_up"], lw=3
+                    (i - 0.5, i - 0.5), 1, 1, fill=False, edgecolor=C["delta_up"], lw=2.5
                 )
             )
 
@@ -204,10 +169,9 @@ def fig_concordance_matrix(matrix, out_dir: Path, fig_dir: Path):
     print("  fig_concordance_matrix")
 
 
-def fig_recall_by_class(matrix, out_dir: Path, fig_dir: Path):
-    """Stacked bar: per-class outcome share (Same / Opp / NoCall / VUS-call)."""
-    fig, ax = plt.subplots(figsize=(11, 6))
-    n_per = {t: sum(matrix.get((t, c), 0) for c in CLASSES + ["NoCall"]) for t in CLASSES}
+def fig_outcome_breakdown(matrix, fig_dir: Path):
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    n_per = class_totals(matrix)
 
     def share(truth, mask):
         n = n_per[truth] or 1
@@ -227,7 +191,6 @@ def fig_recall_by_class(matrix, out_dir: Path, fig_dir: Path):
         "Likely_benign": ["Pathogenic", "Likely_pathogenic"],
         "Benign": ["Pathogenic", "Likely_pathogenic"],
     }
-
     same = [share(t, same_dir_mask[t]) for t in CLASSES]
     nocall = [share(t, ["NoCall"]) for t in CLASSES]
     opp = [share(t, opp_mask[t]) for t in CLASSES]
@@ -235,226 +198,281 @@ def fig_recall_by_class(matrix, out_dir: Path, fig_dir: Path):
 
     x = np.arange(len(CLASSES))
     ax.bar(x, same, color=C["delta_up"], label="Same direction", alpha=0.9)
-    ax.bar(x, other, bottom=same, color=C["VUS"], alpha=0.7, label="VUS / off-direction non-opposite")
-    ax.bar(
-        x,
-        nocall,
-        bottom=[s + o for s, o in zip(same, other)],
-        color="#fbbf24",
-        alpha=0.85,
-        label="NoCall (no ACMG returned)",
-    )
-    ax.bar(
-        x,
-        opp,
-        bottom=[s + o + n for s, o, n in zip(same, other, nocall)],
-        color=C["delta_down"],
-        alpha=0.9,
-        label="Opposite direction",
-    )
+    ax.bar(x, other, bottom=same, color=C["VUS"], alpha=0.7,
+           label="VUS / off-direction non-opposite")
+    ax.bar(x, nocall, bottom=[s + o for s, o in zip(same, other)],
+           color="#fbbf24", alpha=0.85, label="NoCall")
+    ax.bar(x, opp,
+           bottom=[s + o + n for s, o, n in zip(same, other, nocall)],
+           color=C["delta_down"], alpha=0.9, label="Opposite direction")
 
     ax.set_xticks(x)
-    ax.set_xticklabels([CLASS_SHORT[c] for c in CLASSES], fontweight="bold", fontsize=14)
+    ax.set_xticklabels([CLASS_SHORT[c] for c in CLASSES], fontweight="bold", fontsize=13)
     ax.set_xlabel("ClinVar 2-star+ truth class", fontweight="bold")
     ax.set_ylabel("% of class")
-    ax.set_ylim(0, 105)
+    ax.set_ylim(0, 110)
     ax.set_title("Per-class outcome breakdown", fontweight="bold")
     ax.legend(loc="upper right")
     ax.grid(axis="y", alpha=0.15)
 
     for i, (s, n) in enumerate(zip(same, [n_per[t] for t in CLASSES])):
-        ax.text(
-            i, s + 1.5, f"{s:.0f}%\nn={n:,}", ha="center", fontsize=11, fontweight="bold"
+        ax.text(i, s + 1.5, f"{s:.0f}%\nn={n:,}", ha="center", fontsize=10,
+                fontweight="bold")
+
+    plt.tight_layout()
+    for ext in ("png", "pdf"):
+        fig.savefig(fig_dir / f"fig_outcome_breakdown.{ext}", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print("  fig_outcome_breakdown")
+
+
+def fig_criterion_fire_heatmap(fires, totals, fig_dir: Path):
+    """Criterion × truth-class fire rate heatmap. Rows ordered by total
+    fires; cells show % of variants in the truth class where the
+    criterion fired. The dominant diagnostic of "which criteria are
+    informative for which class".
+    """
+    # Order by total fire count, drop criteria that never fire
+    ordered = sorted(
+        [(c, fc, sum(fc.values())) for c, fc in fires.items() if sum(fc.values()) > 0],
+        key=lambda kv: -kv[2],
+    )
+    codes = [c for c, _, _ in ordered]
+    mat = np.zeros((len(codes), len(CLASSES)))
+    counts = np.zeros((len(codes), len(CLASSES)), dtype=int)
+    for i, (_, fc, _) in enumerate(ordered):
+        for j, tcl in enumerate(CLASSES):
+            n = totals[tcl]
+            counts[i, j] = fc.get(tcl, 0)
+            mat[i, j] = 100 * counts[i, j] / n if n else 0
+
+    fig, ax = plt.subplots(figsize=(8.5, max(6, 0.32 * len(codes))))
+    im = ax.imshow(mat, cmap="YlOrRd", aspect="auto", vmin=0, vmax=mat.max() or 1)
+    ax.set_xticks(range(len(CLASSES)))
+    ax.set_xticklabels([CLASS_SHORT[c] for c in CLASSES], fontweight="bold", fontsize=12)
+    ax.set_yticks(range(len(codes)))
+    ax.set_yticklabels(codes, fontfamily="monospace", fontsize=10)
+    ax.set_xlabel("ClinVar 2-star+ truth class", fontweight="bold")
+    ax.set_title("Criterion fire rate by truth class\n(% of class where criterion was met)",
+                 fontweight="bold")
+
+    for i in range(len(codes)):
+        for j in range(len(CLASSES)):
+            v = mat[i, j]
+            if v > 0:
+                color = "white" if v > 35 else "black"
+                if v >= 1:
+                    label = f"{v:.0f}%"
+                elif v >= 0.1:
+                    label = f"{v:.1f}%"
+                else:
+                    label = f"{counts[i, j]}"
+                ax.text(j, i, label, ha="center", va="center", fontsize=8.5, color=color)
+
+    cbar = plt.colorbar(im, ax=ax, shrink=0.7)
+    cbar.set_label("% of class")
+    plt.tight_layout()
+    for ext in ("png", "pdf"):
+        fig.savefig(fig_dir / f"fig_criterion_fire_heatmap.{ext}", dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    print("  fig_criterion_fire_heatmap")
+
+
+def fig_criterion_signatures_by_class(disc, fires, totals, fig_dir: Path):
+    """For each non-VUS truth class, the top criterion signatures of
+    *failed* calls (where fastVEP did not match truth direction). Bars
+    are split by the failure mode: → VUS (insufficient evidence) vs
+    opposite-direction (real disagreement).
+
+    discrepancies.tsv only logs P/LP→VUS, P/LP→LB/B (opposite), and
+    LB/B→P/LP (opposite). Same-direction calls don't appear here.
+    """
+    by_class: dict[str, Counter] = {tcl: Counter() for tcl in CLASSES}
+    by_class_outcome: dict[str, dict[str, int]] = {
+        tcl: defaultdict(lambda: defaultdict(int)) for tcl in CLASSES
+    }
+    for r in disc:
+        sig = "+".join(sorted(set(c for c in r["met_criteria"].split(";") if c))) or "(none)"
+        by_class[r["truth"]][sig] += 1
+        by_class_outcome[r["truth"]][sig][r["predicted"]] += 1
+
+    focus = ["Pathogenic", "Likely_pathogenic", "Likely_benign", "Benign"]
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+    axes_flat = axes.flatten()
+
+    for ax_i, tcl in enumerate(focus):
+        ax = axes_flat[ax_i]
+        sigs = by_class[tcl].most_common(8)
+        if not sigs:
+            ax.set_visible(False)
+            continue
+
+        opp_set = {
+            "Pathogenic": {"Benign", "Likely_benign"},
+            "Likely_pathogenic": {"Benign", "Likely_benign"},
+            "Likely_benign": {"Pathogenic", "Likely_pathogenic"},
+            "Benign": {"Pathogenic", "Likely_pathogenic"},
+        }[tcl]
+
+        labels: list[str] = []
+        vus_counts: list[int] = []
+        opp_counts: list[int] = []
+        nocall_counts: list[int] = []
+        for sig, _total in sigs:
+            outcomes = by_class_outcome[tcl][sig]
+            labels.append(sig if len(sig) <= 36 else sig[:34] + "…")
+            vus_counts.append(outcomes.get("VUS", 0))
+            opp_counts.append(sum(v for k, v in outcomes.items() if k in opp_set))
+            nocall_counts.append(outcomes.get("NoCall", 0))
+
+        y = np.arange(len(labels))
+        ax.barh(y, vus_counts, color=C["VUS"], alpha=0.8, label="→ VUS (insufficient evidence)")
+        left = np.array(vus_counts)
+        ax.barh(y, opp_counts, left=left, color=C["delta_down"], alpha=0.9,
+                label="Opposite direction")
+        left = left + np.array(opp_counts)
+        ax.barh(y, nocall_counts, left=left, color="#fbbf24", alpha=0.85,
+                label="NoCall")
+
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels, fontfamily="monospace", fontsize=9.5)
+        ax.invert_yaxis()
+        n_truth = totals[tcl]
+        n_failed = sum(by_class[tcl].values())
+        ax.set_title(
+            f"{CLASS_SHORT[tcl]} truth (n={n_truth:,};  failed={n_failed:,})\n"
+            f"top 8 criterion signatures of failed calls",
+            fontweight="bold", fontsize=13,
         )
+        ax.set_xlabel("# variants in failure bucket", fontsize=11)
+        ax.grid(axis="x", alpha=0.15)
+        if ax_i == 0:
+            ax.legend(loc="lower right", fontsize=10)
 
+        for yi in range(len(labels)):
+            tot = vus_counts[yi] + opp_counts[yi] + nocall_counts[yi]
+            ax.text(tot + tot * 0.015, yi, f"{tot:,}", va="center",
+                    fontsize=9, color="#374151")
+
+    fig.suptitle(
+        "Why fastVEP fails per truth class: criterion signatures of non-matching calls\n"
+        "(Same-direction calls excluded — they aren't in discrepancies.tsv)",
+        fontweight="bold", fontsize=14, y=1.01,
+    )
     plt.tight_layout()
     for ext in ("png", "pdf"):
-        fig.savefig(fig_dir / f"fig_recall_by_class.{ext}", dpi=300, bbox_inches="tight")
+        fig.savefig(fig_dir / f"fig_criterion_signatures_by_class.{ext}",
+                    dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print("  fig_recall_by_class")
+    print("  fig_criterion_signatures_by_class")
 
 
-def fig_v1_vs_v7_recall(matrix, fig_dir: Path):
-    """Paired bars of per-class same-direction recall, v1 baseline vs v7."""
-    fig, ax = plt.subplots(figsize=(11, 6))
+def fig_lost_to_vus_signatures(disc, fig_dir: Path):
+    """Pathogenic-truth → VUS and Likely_pathogenic-truth → VUS — the
+    dominant failure mode. Show the top criterion signatures of these
+    "lost" cases. Driven by missing manual-curation evidence (PS3
+    functional, PP1 segregation, PP4 phenotype-specific) rather than
+    classifier disagreement.
+    """
+    p_to_vus = Counter()
+    lp_to_vus = Counter()
+    for r in disc:
+        if r["predicted"] != "VUS":
+            continue
+        sig = "+".join(sorted(set(c for c in r["met_criteria"].split(";") if c))) or "(none)"
+        if r["truth"] == "Pathogenic":
+            p_to_vus[sig] += 1
+        elif r["truth"] == "Likely_pathogenic":
+            lp_to_vus[sig] += 1
 
-    def v4_recall(truth):
-        n = sum(matrix.get((truth, c), 0) for c in CLASSES + ["NoCall"]) or 1
-        if truth in ("Pathogenic", "Likely_pathogenic"):
-            same = matrix.get((truth, "Pathogenic"), 0) + matrix.get(
-                (truth, "Likely_pathogenic"), 0
-            )
-        elif truth == "VUS":
-            same = matrix.get((truth, "VUS"), 0)
-        else:
-            same = matrix.get((truth, "Benign"), 0) + matrix.get(
-                (truth, "Likely_benign"), 0
-            )
-        return 100 * same / n
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7.5))
+    for ax, ctr, label, title in (
+        (ax1, p_to_vus, "P→VUS", f"Pathogenic-truth → VUS  (n={sum(p_to_vus.values()):,})"),
+        (ax2, lp_to_vus, "LP→VUS", f"Likely-Pathogenic-truth → VUS  (n={sum(lp_to_vus.values()):,})"),
+    ):
+        sigs = ctr.most_common(15)
+        labels = [s if len(s) <= 35 else s[:32] + "…" for s, _ in sigs]
+        counts = [n for _, n in sigs]
+        y = np.arange(len(labels))
+        ax.barh(y, counts, color=C["P"] if "P→" == label[:2] else C["LP"], alpha=0.85)
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels, fontfamily="monospace", fontsize=10)
+        ax.invert_yaxis()
+        ax.set_xlabel("# variants", fontsize=11)
+        ax.set_title(title, fontweight="bold", fontsize=13)
+        ax.grid(axis="x", alpha=0.15)
+        for yi, n in enumerate(counts):
+            ax.text(n + max(counts) * 0.01, yi, f"{n:,}", va="center",
+                    fontsize=10, color="#374151")
 
-    v1 = [V1_RECALL[c] for c in CLASSES]
-    v4 = [v4_recall(c) for c in CLASSES]
-
-    x = np.arange(len(CLASSES))
-    width = 0.38
-    bars_v1 = ax.bar(
-        x - width / 2,
-        v1,
-        width,
-        color=C["v1"],
-        alpha=0.9,
-        label="v1: REVEL + gnomAD + ClinVar only",
+    fig.suptitle(
+        "What criteria fired for the variants that fastVEP could only call VUS?\n"
+        "(The dominant failure mode — typically driven by missing PS3 / PP1 / PP4 evidence)",
+        fontweight="bold", fontsize=14, y=1.0,
     )
-    bars_v4 = ax.bar(
-        x + width / 2,
-        v4,
-        width,
-        color=C["v7"],
-        alpha=0.95,
-        label="v7: + PhyloP + SpliceAI + ClinGen GDV + indel allele fix (current)",
-    )
-    ax.set_xticks(x)
-    ax.set_xticklabels([CLASS_SHORT[c] for c in CLASSES], fontweight="bold", fontsize=14)
-    ax.set_ylabel("Same-direction recall (%)")
-    ax.set_ylim(0, 105)
-    ax.set_title(
-        "Recall lift from loading PhyloP + SpliceAI + ClinGen Gene-Disease Validity",
-        fontweight="bold",
-    )
-    ax.grid(axis="y", alpha=0.15)
-    ax.legend(loc="upper center")
-
-    for x0, b1, b4 in zip(x, v1, v4):
-        ax.text(x0 - width / 2, b1 + 1, f"{b1:.0f}%", ha="center", fontsize=10)
-        ax.text(x0 + width / 2, b4 + 1, f"{b4:.0f}%", ha="center", fontsize=10, fontweight="bold")
-        delta = b4 - b1
-        color = C["delta_up"] if delta > 0 else C["delta_down"]
-        ax.annotate(
-            f"{delta:+.0f} pp",
-            xy=(x0, max(b1, b4) + 7),
-            ha="center",
-            fontsize=11,
-            color=color,
-            fontweight="bold",
-        )
-
     plt.tight_layout()
     for ext in ("png", "pdf"):
-        fig.savefig(fig_dir / f"fig_v1_vs_v7_recall.{ext}", dpi=300, bbox_inches="tight")
+        fig.savefig(fig_dir / f"fig_lost_to_vus_signatures.{ext}",
+                    dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print("  fig_v1_vs_v7_recall")
+    print("  fig_lost_to_vus_signatures")
 
 
-def fig_criterion_fires(fires: dict[str, dict[str, int]], fig_dir: Path):
-    """Stacked horizontal bars: top criteria, fires colored by truth class."""
-    totals = sorted(
-        fires.items(), key=lambda kv: -sum(kv[1].values())
-    )[:18]
-    codes = [c for c, _ in totals]
+def fig_opposite_direction_signatures(disc, fig_dir: Path):
+    """For the ~100 truly opposite-direction cases, show the criterion
+    patterns by reversal direction.
+    """
+    PtoB = Counter()  # Pathogenic-truth → Likely_benign or Benign predicted
+    BtoP = Counter()  # Benign-truth → Likely_pathogenic or Pathogenic predicted
+    for r in disc:
+        truth, pred = r["truth"], r["predicted"]
+        sig = "+".join(sorted(set(c for c in r["met_criteria"].split(";") if c))) or "(none)"
+        if truth in ("Pathogenic", "Likely_pathogenic") and pred in ("Likely_benign", "Benign"):
+            PtoB[sig] += 1
+        elif truth in ("Likely_benign", "Benign") and pred in ("Likely_pathogenic", "Pathogenic"):
+            BtoP[sig] += 1
 
-    fig, ax = plt.subplots(figsize=(13, 9))
-    y = np.arange(len(codes))
-    left = np.zeros(len(codes))
-    for tcl in CLASSES:
-        vals = np.array([fires[c].get(tcl, 0) for c in codes])
-        ax.barh(y, vals, left=left, color=CLASS_COLOR[tcl], alpha=0.9, label=CLASS_SHORT[tcl])
-        left += vals
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    for ax, ctr, label, color, title in (
+        (ax1, PtoB, "P/LP→B/LB", C["delta_down"],
+         f"Pathogenic-tier truth → Benign-tier predicted  (n={sum(PtoB.values())})"),
+        (ax2, BtoP, "B/LB→P/LP", "#a855f7",
+         f"Benign-tier truth → Pathogenic-tier predicted  (n={sum(BtoP.values())})"),
+    ):
+        sigs = ctr.most_common(15)
+        if not sigs:
+            ax.text(0.5, 0.5, "(no cases)", ha="center", va="center",
+                    transform=ax.transAxes, fontsize=14, color="#666")
+            ax.set_title(title, fontweight="bold", fontsize=13)
+            continue
+        labels = [s if len(s) <= 35 else s[:32] + "…" for s, _ in sigs]
+        counts = [n for _, n in sigs]
+        y = np.arange(len(labels))
+        ax.barh(y, counts, color=color, alpha=0.85)
+        ax.set_yticks(y)
+        ax.set_yticklabels(labels, fontfamily="monospace", fontsize=10)
+        ax.invert_yaxis()
+        ax.set_xlabel("# variants", fontsize=11)
+        ax.set_title(title, fontweight="bold", fontsize=13)
+        ax.grid(axis="x", alpha=0.15)
+        for yi, n in enumerate(counts):
+            ax.text(n + max(counts) * 0.02, yi, f"{n}", va="center",
+                    fontsize=10, color="#374151")
 
-    ax.set_yticks(y)
-    ax.set_yticklabels(codes, fontfamily="monospace", fontsize=12)
-    ax.invert_yaxis()
-    ax.set_xlabel("Times the criterion was met (across all 627k classified variants)")
-    ax.set_title(
-        "Criterion fire counts by truth class\n(stacked: each colour = ClinVar truth label)",
-        fontweight="bold",
+    fig.suptitle(
+        "Opposite-direction discrepancies: criterion patterns by direction\n"
+        "(These are the candidate set for medical-geneticist review)",
+        fontweight="bold", fontsize=14, y=1.02,
     )
-    ax.legend(loc="lower right", title="Truth class")
-    ax.grid(axis="x", alpha=0.15)
-
-    for yi, code in enumerate(codes):
-        total = sum(fires[code].values())
-        ax.text(total + total * 0.005, yi, f"{total:,}", va="center", fontsize=10, color="#374151")
-
     plt.tight_layout()
     for ext in ("png", "pdf"):
-        fig.savefig(fig_dir / f"fig_criterion_fires.{ext}", dpi=300, bbox_inches="tight")
+        fig.savefig(fig_dir / f"fig_opposite_direction_signatures.{ext}",
+                    dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print("  fig_criterion_fires")
+    print("  fig_opposite_direction_signatures")
 
 
-def fig_bp7_pvs1_delta(fires: dict[str, dict[str, int]], fig_dir: Path):
-    """Lollipop comparing v1 vs v4 fire counts for the criteria most
-    affected by the SA-source additions (BP7 from PhyloP+SpliceAI;
-    PVS1 from ClinGen GDV)."""
-    keys = ["BP7", "PVS1", "PVS1_Supporting", "PS1", "BS2", "BA1"]
-    v4_total = {k: sum(fires.get(k, {}).get(t, 0) for t in CLASSES) for k in keys}
-    v1_total = {k: V1_FIRES.get(k, 0) for k in keys}
-
-    fig, ax = plt.subplots(figsize=(11, 6))
-    y = np.arange(len(keys))
-    for yi, k in enumerate(keys):
-        v1n = v1_total[k]
-        v4n = v4_total[k]
-        ax.plot([v1n, v4n], [yi, yi], color="#cbd5e1", lw=3, zorder=1)
-        ax.scatter([v1n], [yi], color=C["v1"], s=130, zorder=2, label="v1" if yi == 0 else None)
-        ax.scatter([v4n], [yi], color=C["v7"], s=160, zorder=3, label="v7" if yi == 0 else None)
-        delta = v4n - v1n
-        rate = (v4n / max(v1n, 1)) if v1n else float("inf")
-        annot = f"  Δ {delta:+,}" + (f" ({rate:.1f}×)" if v1n else "  (new)")
-        ax.text(max(v1n, v4n), yi, annot, va="center", fontsize=11, color=C["delta_up"], fontweight="bold")
-
-    ax.set_yticks(y)
-    ax.set_yticklabels(keys, fontfamily="monospace", fontsize=13)
-    ax.invert_yaxis()
-    ax.set_xscale("symlog", linthresh=10)
-    ax.set_xlabel("Times the criterion fired (log scale)")
-    ax.set_title(
-        "Single-criterion lift: v1 (REVEL + gnomAD only) → v7 (full SA stack + BS1/BS2 fixes)",
-        fontweight="bold",
-    )
-    ax.grid(axis="x", alpha=0.15)
-    ax.legend(loc="lower right")
-
-    plt.tight_layout()
-    for ext in ("png", "pdf"):
-        fig.savefig(fig_dir / f"fig_bp7_pvs1_delta.{ext}", dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print("  fig_bp7_pvs1_delta")
-
-
-def fig_headline_v1_vs_v7(out_dir: Path, fig_dir: Path):
-    headline = parse_summary(out_dir)
-    fig, ax = plt.subplots(figsize=(10, 5.5))
-    metrics = [
-        ("Same\ndirection", "same_direction"),
-        ("Exact\nmatch", "exact_match"),
-        ("Opposite\ndirection", "opposite_direction"),
-        ("NoCall", "no_call"),
-    ]
-    x = np.arange(len(metrics))
-    width = 0.38
-    v1 = [V1_HEADLINE[k] for _, k in metrics]
-    v4 = [headline.get(k, 0.0) for _, k in metrics]
-    ax.bar(x - width / 2, v1, width, color=C["v1"], alpha=0.9, label="v1")
-    ax.bar(x + width / 2, v4, width, color=C["v7"], alpha=0.95, label="v7")
-
-    ax.set_xticks(x)
-    ax.set_xticklabels([lab for lab, _ in metrics], fontsize=13, fontweight="bold")
-    ax.set_ylabel("%")
-    ax.set_title("Headline concordance metrics: v1 vs v7", fontweight="bold")
-    ax.legend()
-    ax.grid(axis="y", alpha=0.15)
-
-    for x0, a, b in zip(x, v1, v4):
-        ax.text(x0 - width / 2, a + 1, f"{a:.1f}", ha="center", fontsize=11)
-        ax.text(x0 + width / 2, b + 1, f"{b:.1f}", ha="center", fontsize=11, fontweight="bold")
-
-    plt.tight_layout()
-    for ext in ("png", "pdf"):
-        fig.savefig(fig_dir / f"fig_headline_v1_vs_v7.{ext}", dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print("  fig_headline_v1_vs_v7")
-
+# ──────────────────────────────────────────────────────────────────────
 
 def main():
     if len(sys.argv) > 1:
@@ -467,14 +485,32 @@ def main():
     print(f"Reading {out_dir}")
     matrix = read_matrix(out_dir)
     fires = read_criterion_fires(out_dir)
+    disc = read_discrepancies(out_dir)
+    totals = class_totals(matrix)
+
+    # Wipe stale comparison-style figures from prior versions to keep
+    # the figures/ directory clean.
+    for stale in (
+        "fig_v1_vs_v6_recall.png", "fig_v1_vs_v6_recall.pdf",
+        "fig_v1_vs_v7_recall.png", "fig_v1_vs_v7_recall.pdf",
+        "fig_headline_v1_vs_v6.png", "fig_headline_v1_vs_v6.pdf",
+        "fig_headline_v1_vs_v7.png", "fig_headline_v1_vs_v7.pdf",
+        "fig_bp7_pvs1_delta.png", "fig_bp7_pvs1_delta.pdf",
+        "fig_recall_by_class.png", "fig_recall_by_class.pdf",
+        "fig_criterion_fires.png", "fig_criterion_fires.pdf",
+    ):
+        try:
+            (fig_dir / stale).unlink()
+        except FileNotFoundError:
+            pass
 
     print("Generating figures...")
-    fig_concordance_matrix(matrix, out_dir, fig_dir)
-    fig_recall_by_class(matrix, out_dir, fig_dir)
-    fig_v1_vs_v7_recall(matrix, fig_dir)
-    fig_headline_v1_vs_v7(out_dir, fig_dir)
-    fig_criterion_fires(fires, fig_dir)
-    fig_bp7_pvs1_delta(fires, fig_dir)
+    fig_concordance_matrix(matrix, fig_dir)
+    fig_outcome_breakdown(matrix, fig_dir)
+    fig_criterion_fire_heatmap(fires, totals, fig_dir)
+    fig_criterion_signatures_by_class(disc, fires, totals, fig_dir)
+    fig_lost_to_vus_signatures(disc, fig_dir)
+    fig_opposite_direction_signatures(disc, fig_dir)
 
     print(f"\nDone. {len(list(fig_dir.glob('*.png')))} PNG / {len(list(fig_dir.glob('*.pdf')))} PDF in {fig_dir}")
 

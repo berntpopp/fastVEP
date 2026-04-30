@@ -2,12 +2,12 @@
 """Real-data benchmark figures for the ClinVar 2-star+ evaluation.
 
 Reads outputs from `03_evaluate_concordance.py` (under
-`data/benchmark/output_full/` by default) and emits 5 PDF/PNG panels
+`data/benchmark/output_v5/` by default) and emits 5 PDF/PNG panels
 under `<output_dir>/figures/`:
 
   fig_concordance_matrix       row-normalised heatmap of truth × predicted
   fig_recall_by_class          per-class same-direction recall (v4)
-  fig_v1_vs_v4_recall          paired bars showing the lift from loading
+  fig_v1_vs_v5_recall          paired bars showing the lift from loading
                                PhyloP+SpliceAI+ClinGen GDV (the v1
                                baseline is hard-coded from the prior run
                                whose results are recorded in METHODS.md;
@@ -18,7 +18,7 @@ under `<output_dir>/figures/`:
                                drove the recall lift
 
 Usage:
-  generate_figures.py                     # uses ../../data/benchmark/output_full
+  generate_figures.py                     # uses ../../data/benchmark/output_v5
   generate_figures.py <out_dir>
 """
 
@@ -274,7 +274,7 @@ def fig_recall_by_class(matrix, out_dir: Path, fig_dir: Path):
     print("  fig_recall_by_class")
 
 
-def fig_v1_vs_v4_recall(matrix, fig_dir: Path):
+def fig_v1_vs_v5_recall(matrix, fig_dir: Path):
     """Paired bars of per-class same-direction recall, v1 baseline vs v4."""
     fig, ax = plt.subplots(figsize=(11, 6))
 
@@ -340,9 +340,9 @@ def fig_v1_vs_v4_recall(matrix, fig_dir: Path):
 
     plt.tight_layout()
     for ext in ("png", "pdf"):
-        fig.savefig(fig_dir / f"fig_v1_vs_v4_recall.{ext}", dpi=300, bbox_inches="tight")
+        fig.savefig(fig_dir / f"fig_v1_vs_v5_recall.{ext}", dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print("  fig_v1_vs_v4_recall")
+    print("  fig_v1_vs_v5_recall")
 
 
 def fig_criterion_fires(fires: dict[str, dict[str, int]], fig_dir: Path):
@@ -422,7 +422,7 @@ def fig_bp7_pvs1_delta(fires: dict[str, dict[str, int]], fig_dir: Path):
     print("  fig_bp7_pvs1_delta")
 
 
-def fig_headline_v1_vs_v4(out_dir: Path, fig_dir: Path):
+def fig_headline_v1_vs_v5(out_dir: Path, fig_dir: Path):
     headline = parse_summary(out_dir)
     fig, ax = plt.subplots(figsize=(10, 5.5))
     metrics = [
@@ -451,16 +451,16 @@ def fig_headline_v1_vs_v4(out_dir: Path, fig_dir: Path):
 
     plt.tight_layout()
     for ext in ("png", "pdf"):
-        fig.savefig(fig_dir / f"fig_headline_v1_vs_v4.{ext}", dpi=300, bbox_inches="tight")
+        fig.savefig(fig_dir / f"fig_headline_v1_vs_v5.{ext}", dpi=300, bbox_inches="tight")
     plt.close(fig)
-    print("  fig_headline_v1_vs_v4")
+    print("  fig_headline_v1_vs_v5")
 
 
 def main():
     if len(sys.argv) > 1:
         out_dir = Path(sys.argv[1])
     else:
-        out_dir = Path(__file__).resolve().parents[3] / "data/benchmark/output_full"
+        out_dir = Path(__file__).resolve().parents[3] / "data/benchmark/output_v5"
     fig_dir = out_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
 
@@ -471,8 +471,8 @@ def main():
     print("Generating figures...")
     fig_concordance_matrix(matrix, out_dir, fig_dir)
     fig_recall_by_class(matrix, out_dir, fig_dir)
-    fig_v1_vs_v4_recall(matrix, fig_dir)
-    fig_headline_v1_vs_v4(out_dir, fig_dir)
+    fig_v1_vs_v5_recall(matrix, fig_dir)
+    fig_headline_v1_vs_v5(out_dir, fig_dir)
     fig_criterion_fires(fires, fig_dir)
     fig_bp7_pvs1_delta(fires, fig_dir)
 

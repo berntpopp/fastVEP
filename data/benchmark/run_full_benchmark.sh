@@ -8,13 +8,13 @@
 #   - test_data/organisms/human/                  (FASTA + GFF3 + cache)
 #
 # Outputs:
-#   - data/benchmark/output_full/clinvar_2star.fastvep.vcf.gz   (annotation + ACMG, bgzipped)
-#   - data/benchmark/output_full/concordance_summary.txt
-#   - data/benchmark/output_full/concordance_matrix.csv
-#   - data/benchmark/output_full/concordance_by_chrom.csv
-#   - data/benchmark/output_full/concordance_by_consequence.csv
-#   - data/benchmark/output_full/criterion_firing_rates.csv
-#   - data/benchmark/output_full/discrepancies.tsv
+#   - data/benchmark/output_v5/clinvar_2star.fastvep.vcf.gz   (annotation + ACMG, bgzipped)
+#   - data/benchmark/output_v5/concordance_summary.txt
+#   - data/benchmark/output_v5/concordance_matrix.csv
+#   - data/benchmark/output_v5/concordance_by_chrom.csv
+#   - data/benchmark/output_v5/concordance_by_consequence.csv
+#   - data/benchmark/output_v5/criterion_firing_rates.csv
+#   - data/benchmark/output_v5/discrepancies.tsv
 #
 # Output is VCF-bgzipped (~10× smaller than the prior pretty-printed JSON
 # and ~100× smaller than tab format with all fields). VCF is the only
@@ -26,7 +26,7 @@ INPUT=$ROOT/data/benchmark/clinvar_2star.vcf
 GFF3=$ROOT/test_data/organisms/human/Homo_sapiens.GRCh38.115.gff3
 FASTA=$ROOT/test_data/organisms/human/Homo_sapiens.GRCh38.dna.primary_assembly.fa
 SA_DIR=$ROOT/data/benchmark/sa_db
-OUT_DIR=$ROOT/data/benchmark/output_full
+OUT_DIR=$ROOT/data/benchmark/output_v5
 mkdir -p "$OUT_DIR"
 VCFGZ="$OUT_DIR/clinvar_2star.fastvep.vcf.gz"
 

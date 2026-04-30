@@ -1,0 +1,25 @@
+ClinVar 2-star+ concordance against fastvep ACMG classifier (real data, v1)
+===========================================================================
+
+Truth records:       673,660
+Classified:          627,375
+Truth not annotated: 46,285
+
+Per-class breakdown (entire dataset):
+truth                         n    exact   same_dir   opposite  no_call
+Pathogenic                49882       80       7836         20        1
+Likely_pathogenic         11589     2418       2423          5        0
+VUS                      288912   279031     279031          0        0
+Likely_benign            126036      778       4065          1        0
+Benign                   150957    48282      50119          5        0
+
+TOTAL                    627376   330589     343474         31        1
+
+Exact-match rate:        52.7%
+Same-direction rate:     54.7%
+Opposite-direction rate: 0.0%
+NoCall rate:             0.0%
+
+(Reconstructed from a prior end-to-end run whose raw outputs have
+since been overwritten. SA stack used for v1 is documented in
+data/benchmark/RUN_VERSIONS.md.)

@@ -304,14 +304,14 @@ Generate by running:
 python3 analysis/acmg_benchmark/real_data/generate_figures.py
 ```
 
-Outputs (`data/benchmark/output_full/figures/`, PNG + PDF):
+Outputs (`data/benchmark/output_v5/figures/`, PNG + PDF):
 
 | File | Content |
 |------|---------|
 | `fig_concordance_matrix` | row-normalised truth × predicted heatmap |
 | `fig_recall_by_class` | per-class outcome breakdown (same / off / NoCall / opposite) |
-| `fig_v1_vs_v4_recall` | per-class same-direction recall, v1 baseline vs v4 |
-| `fig_headline_v1_vs_v4` | headline metrics (exact / same-dir / opposite / NoCall) v1 vs v4 |
+| `fig_v1_vs_v5_recall` | per-class same-direction recall, v1 baseline vs v5 |
+| `fig_headline_v1_vs_v5` | headline metrics (exact / same-dir / opposite / NoCall) v1 vs v5 |
 | `fig_criterion_fires` | top-18 criteria by total fire count, stacked by truth class |
 | `fig_bp7_pvs1_delta` | single-criterion lift v1 → v4 for BP7, PVS1, PS1, BS2, BA1 |
 
@@ -461,7 +461,7 @@ Per-criterion fire counts (Pathogenic / LP / VUS / LB / Benign):
 - **Opposite-direction rate is 0.06 %** (389 / 673,660): when the
   classifier commits to a directional call it agrees with the curated
   review-panel call ~99.94 % of the time. Per-variant discrepancies
-  are in `data/benchmark/output_full/discrepancies.tsv` for
+  are in `data/benchmark/output_v5/discrepancies.tsv` for
   case-by-case review.
 - **NoCall is 0.0 %** in v5 (after the indel-allele-matching fix).
   Earlier runs reported 6.8 % NoCall, but this was an artefact of the

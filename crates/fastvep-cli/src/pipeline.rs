@@ -1748,6 +1748,29 @@ pub fn run_sa_build(source: &str, input: &str, output: &str, assembly: &str) -> 
     };
     let buf_reader = io::BufReader::new(reader);
 
+    if source == "spliceai" {
+        let output_path = Path::new(output);
+        let mut writer = SaWriter::new(header);
+        let mut record_count = 0usize;
+        let records = fastvep_sa::sources::spliceai::iter_spliceai_vcf(buf_reader, &chrom_map)
+            .map(|record| {
+                if record.is_ok() {
+                    record_count += 1;
+                }
+                record
+            });
+        writer.write_results_to_files(output_path, records, &chrom_list)?;
+
+        eprintln!("Parsed {} records from {}", record_count, source);
+        eprintln!(
+            "Wrote: {} and {}",
+            output_path.with_extension("osa").display(),
+            output_path.with_extension("osa.idx").display()
+        );
+
+        return Ok(());
+    }
+
     let records = match source {
         "clinvar" => fastvep_sa::sources::clinvar::parse_clinvar_vcf(buf_reader, &chrom_map)?,
         "gnomad" => fastvep_sa::sources::gnomad::parse_gnomad_vcf(buf_reader, &chrom_map)?,
@@ -1762,7 +1785,6 @@ pub fn run_sa_build(source: &str, input: &str, output: &str, assembly: &str) -> 
         "phylop" => parse_phylop_auto(buf_reader, &chrom_map)?,
         "gerp" | "dann" => fastvep_sa::sources::scores::parse_score_tsv(buf_reader, &chrom_map, false)?,
         "revel" => fastvep_sa::sources::revel::parse_revel(buf_reader, &chrom_map, 2)?,
-        "spliceai" => fastvep_sa::sources::spliceai::parse_spliceai_vcf(buf_reader, &chrom_map)?,
         "primateai" => fastvep_sa::sources::primateai::parse_primateai(buf_reader, &chrom_map)?,
         "dbnsfp" => fastvep_sa::sources::dbnsfp::parse_dbnsfp(buf_reader, &chrom_map)?,
         _ => unreachable!(),

@@ -1,5 +1,6 @@
 use crate::variant::{AlleleAnnotation, TranscriptVariation, VariationFeature};
-use fastvep_core::Consequence;
+use fastvep_core::{Allele, Consequence};
+use serde_json::Value;
 use std::fmt::Write as FmtWrite;
 
 /// Format a VCF CSQ INFO field value from a VariationFeature.
@@ -297,6 +298,552 @@ pub fn csq_header_line(fields: &[&str]) -> String {
         "##INFO=<ID=CSQ,Number=.,Type=String,Description=\"Consequence annotations from fastVEP. Format: {}\">",
         fields.join("|")
     )
+}
+
+/// Generate the VCF INFO header line for SpliceAI annotations emitted from fastSA.
+pub fn spliceai_header_line() -> &'static str {
+    "##INFO=<ID=SpliceAI,Number=.,Type=String,Description=\"SpliceAI annotations. Format: ALLELE|SYMBOL|DS_AG|DS_AL|DS_DG|DS_DL|DP_AG|DP_AL|DP_DG|DP_DL\">"
+}
+
+#[derive(Clone, Copy)]
+struct VcfProjectionSpec {
+    json_key: &'static str,
+    info_id: &'static str,
+    description: &'static str,
+    fields: &'static [(&'static str, &'static str)],
+    kind: VcfProjectionKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VcfProjectionKind {
+    AlleleObject,
+    AlleleScalar,
+    GeneObject,
+    ClinvarProtein,
+}
+
+const CLINVAR_FIELDS: &[(&str, &str)] = &[
+    ("SIGNIFICANCE", "significance"),
+    ("REVIEW_STATUS", "reviewStatus"),
+    ("PHENOTYPES", "phenotypes"),
+    ("VARIANT_CLASS", "variantClass"),
+    ("SO_ACCESSION", "soAccession"),
+];
+const GNOMAD_FIELDS: &[(&str, &str)] = &[
+    ("ALL_AF", "allAf"),
+    ("ALL_AC", "allAc"),
+    ("ALL_AN", "allAn"),
+    ("ALL_HC", "allHc"),
+    ("AFR_AF", "afrAf"),
+    ("AMR_AF", "amrAf"),
+    ("ASJ_AF", "asjAf"),
+    ("EAS_AF", "easAf"),
+    ("FIN_AF", "finAf"),
+    ("MID_AF", "midAf"),
+    ("NFE_AF", "nfeAf"),
+    ("OTH_AF", "othAf"),
+    ("REMAINING_AF", "remainingAf"),
+    ("SAS_AF", "sasAf"),
+];
+const DBSNP_FIELDS: &[(&str, &str)] = &[("ID", "id"), ("GLOBAL_MAF", "globalMaf")];
+const COSMIC_FIELDS: &[(&str, &str)] = &[("ID", "id"), ("GENE", "gene"), ("COUNT", "count")];
+const ONEKG_FIELDS: &[(&str, &str)] = &[
+    ("ALL_AF", "allAf"),
+    ("AFR_AF", "afrAf"),
+    ("AMR_AF", "amrAf"),
+    ("EAS_AF", "easAf"),
+    ("EUR_AF", "eurAf"),
+    ("SAS_AF", "sasAf"),
+];
+const TOPMED_FIELDS: &[(&str, &str)] = &[("ALL_AF", "allAf"), ("ALL_AC", "allAc"), ("ALL_AN", "allAn")];
+const MITOMAP_FIELDS: &[(&str, &str)] = &[("DISEASE", "disease"), ("STATUS", "status")];
+const SCORE_FIELDS: &[(&str, &str)] = &[("SCORE", "")];
+const SCORE_OBJECT_FIELDS: &[(&str, &str)] = &[("SCORE", "score")];
+const DBNSFP_FIELDS: &[(&str, &str)] = &[("SIFT", "sift"), ("POLYPHEN", "polyphen")];
+const OMIM_FIELDS: &[(&str, &str)] = &[("MIM_NUMBER", "mimNumber"), ("PHENOTYPES", "phenotypes")];
+const GNOMAD_GENE_FIELDS: &[(&str, &str)] = &[
+    ("PLI", "pLI"),
+    ("LOEUF", "loeuf"),
+    ("MIS_Z", "misZ"),
+    ("SYN_Z", "synZ"),
+];
+const CLINVAR_PROTEIN_FIELDS: &[(&str, &str)] = &[("PROTEIN_VARIANTS", "proteinVariants")];
+
+const VCF_PROJECTION_SPECS: &[VcfProjectionSpec] = &[
+    VcfProjectionSpec {
+        json_key: "clinvar",
+        info_id: "FV_CLINVAR",
+        description: "fastVEP ClinVar annotations. Format: ALLELE|SIGNIFICANCE|REVIEW_STATUS|PHENOTYPES|VARIANT_CLASS|SO_ACCESSION",
+        fields: CLINVAR_FIELDS,
+        kind: VcfProjectionKind::AlleleObject,
+    },
+    VcfProjectionSpec {
+        json_key: "gnomad",
+        info_id: "FV_GNOMAD",
+        description: "fastVEP gnomAD annotations. Format: ALLELE|ALL_AF|ALL_AC|ALL_AN|ALL_HC|AFR_AF|AMR_AF|ASJ_AF|EAS_AF|FIN_AF|MID_AF|NFE_AF|OTH_AF|REMAINING_AF|SAS_AF",
+        fields: GNOMAD_FIELDS,
+        kind: VcfProjectionKind::AlleleObject,
+    },
+    VcfProjectionSpec {
+        json_key: "dbsnp",
+        info_id: "FV_DBSNP",
+        description: "fastVEP dbSNP annotations. Format: ALLELE|ID|GLOBAL_MAF",
+        fields: DBSNP_FIELDS,
+        kind: VcfProjectionKind::AlleleObject,
+    },
+    VcfProjectionSpec {
+        json_key: "cosmic",
+        info_id: "FV_COSMIC",
+        description: "fastVEP COSMIC annotations. Format: ALLELE|ID|GENE|COUNT",
+        fields: COSMIC_FIELDS,
+        kind: VcfProjectionKind::AlleleObject,
+    },
+    VcfProjectionSpec {
+        json_key: "oneKg",
+        info_id: "FV_1KG",
+        description: "fastVEP 1000 Genomes annotations. Format: ALLELE|ALL_AF|AFR_AF|AMR_AF|EAS_AF|EUR_AF|SAS_AF",
+        fields: ONEKG_FIELDS,
+        kind: VcfProjectionKind::AlleleObject,
+    },
+    VcfProjectionSpec {
+        json_key: "topmed",
+        info_id: "FV_TOPMED",
+        description: "fastVEP TOPMed annotations. Format: ALLELE|ALL_AF|ALL_AC|ALL_AN",
+        fields: TOPMED_FIELDS,
+        kind: VcfProjectionKind::AlleleObject,
+    },
+    VcfProjectionSpec {
+        json_key: "mitomap",
+        info_id: "FV_MITOMAP",
+        description: "fastVEP MitoMap annotations. Format: ALLELE|DISEASE|STATUS",
+        fields: MITOMAP_FIELDS,
+        kind: VcfProjectionKind::AlleleObject,
+    },
+    VcfProjectionSpec {
+        json_key: "phylop",
+        info_id: "FV_PHYLOP",
+        description: "fastVEP PhyloP annotations. Format: ALLELE|SCORE",
+        fields: SCORE_FIELDS,
+        kind: VcfProjectionKind::AlleleScalar,
+    },
+    VcfProjectionSpec {
+        json_key: "gerp",
+        info_id: "FV_GERP",
+        description: "fastVEP GERP annotations. Format: ALLELE|SCORE",
+        fields: SCORE_FIELDS,
+        kind: VcfProjectionKind::AlleleScalar,
+    },
+    VcfProjectionSpec {
+        json_key: "dann",
+        info_id: "FV_DANN",
+        description: "fastVEP DANN annotations. Format: ALLELE|SCORE",
+        fields: SCORE_FIELDS,
+        kind: VcfProjectionKind::AlleleScalar,
+    },
+    VcfProjectionSpec {
+        json_key: "revel",
+        info_id: "FV_REVEL",
+        description: "fastVEP REVEL annotations. Format: ALLELE|SCORE",
+        fields: SCORE_OBJECT_FIELDS,
+        kind: VcfProjectionKind::AlleleObject,
+    },
+    VcfProjectionSpec {
+        json_key: "primateAI",
+        info_id: "FV_PRIMATEAI",
+        description: "fastVEP PrimateAI annotations. Format: ALLELE|SCORE",
+        fields: SCORE_OBJECT_FIELDS,
+        kind: VcfProjectionKind::AlleleObject,
+    },
+    VcfProjectionSpec {
+        json_key: "dbnsfp",
+        info_id: "FV_DBNSFP",
+        description: "fastVEP dbNSFP annotations. Format: ALLELE|SIFT|POLYPHEN",
+        fields: DBNSFP_FIELDS,
+        kind: VcfProjectionKind::AlleleObject,
+    },
+    VcfProjectionSpec {
+        json_key: "omim",
+        info_id: "FV_OMIM",
+        description: "fastVEP OMIM annotations. Format: SYMBOL|MIM_NUMBER|PHENOTYPES",
+        fields: OMIM_FIELDS,
+        kind: VcfProjectionKind::GeneObject,
+    },
+    VcfProjectionSpec {
+        json_key: "gnomad_genes",
+        info_id: "FV_GNOMAD_GENE",
+        description: "fastVEP gnomAD gene constraint annotations. Format: SYMBOL|PLI|LOEUF|MIS_Z|SYN_Z",
+        fields: GNOMAD_GENE_FIELDS,
+        kind: VcfProjectionKind::GeneObject,
+    },
+    VcfProjectionSpec {
+        json_key: "clinvar_protein",
+        info_id: "FV_CLINVAR_PROTEIN",
+        description: "fastVEP ClinVar protein annotations. Format: SYMBOL|PROTEIN_VARIANTS",
+        fields: CLINVAR_PROTEIN_FIELDS,
+        kind: VcfProjectionKind::ClinvarProtein,
+    },
+];
+
+/// Format fastSA SpliceAI annotations as a VCF-compatible INFO field value.
+pub fn format_spliceai_info(vf: &VariationFeature) -> Option<String> {
+    format_supplementary_vcf_info(vf)
+        .into_iter()
+        .find_map(|(id, value)| if id == "SpliceAI" { Some(value) } else { None })
+}
+
+/// Return VCF INFO IDs that fastVEP owns for the given loaded sources.
+pub fn vcf_owned_info_ids(sa_keys: &[String], gene_keys: &[String]) -> Vec<&'static str> {
+    let mut ids = vec!["CSQ"];
+    if sa_keys.iter().any(|key| key == "spliceAI") {
+        ids.push("SpliceAI");
+    }
+    for spec in VCF_PROJECTION_SPECS {
+        let loaded = match spec.kind {
+            VcfProjectionKind::GeneObject | VcfProjectionKind::ClinvarProtein => {
+                gene_keys.iter().any(|key| key == spec.json_key)
+            }
+            VcfProjectionKind::AlleleObject | VcfProjectionKind::AlleleScalar => {
+                sa_keys.iter().any(|key| key == spec.json_key)
+            }
+        };
+        if loaded {
+            ids.push(spec.info_id);
+        }
+    }
+    ids
+}
+
+/// Generate fastVEP-owned VCF INFO header lines for the loaded sources.
+pub fn vcf_info_header_lines(
+    sa_keys: &[String],
+    gene_keys: &[String],
+    csq_fields: &[&str],
+) -> Vec<String> {
+    let mut headers = vec![csq_header_line(csq_fields)];
+    if sa_keys.iter().any(|key| key == "spliceAI") {
+        headers.push(spliceai_header_line().to_string());
+    }
+    for spec in VCF_PROJECTION_SPECS {
+        let loaded = match spec.kind {
+            VcfProjectionKind::GeneObject | VcfProjectionKind::ClinvarProtein => {
+                gene_keys.iter().any(|key| key == spec.json_key)
+            }
+            VcfProjectionKind::AlleleObject | VcfProjectionKind::AlleleScalar => {
+                sa_keys.iter().any(|key| key == spec.json_key)
+            }
+        };
+        if loaded {
+            headers.push(format!(
+                "##INFO=<ID={},Number=.,Type=String,Description=\"{}\">",
+                spec.info_id, spec.description
+            ));
+        }
+    }
+    headers
+}
+
+/// Parse a VCF INFO header ID from a structured INFO header line.
+pub fn vcf_info_header_id(line: &str) -> Option<&str> {
+    let rest = line.strip_prefix("##INFO=<ID=")?;
+    let end = rest.find([',', '>'])?;
+    Some(&rest[..end])
+}
+
+/// Format all supplementary VCF INFO projections for an annotated variant.
+pub fn format_supplementary_vcf_info(vf: &VariationFeature) -> Vec<(String, String)> {
+    let mut projected = Vec::new();
+
+    if let Some(value) = format_spliceai_projection(vf) {
+        projected.push(("SpliceAI".to_string(), value));
+    }
+
+    for spec in VCF_PROJECTION_SPECS {
+        let value = match spec.kind {
+            VcfProjectionKind::AlleleObject | VcfProjectionKind::AlleleScalar => {
+                format_allele_projection(vf, spec)
+            }
+            VcfProjectionKind::GeneObject => format_gene_projection(vf, spec),
+            VcfProjectionKind::ClinvarProtein => format_clinvar_protein_projection(vf, spec),
+        };
+        if let Some(value) = value {
+            projected.push((spec.info_id.to_string(), value));
+        }
+    }
+
+    projected
+}
+
+/// Format final VCF INFO by replacing fastVEP-owned fields and appending current projections.
+pub fn format_vcf_info_fields(original_info: &str, vf: &VariationFeature, csq: &str) -> String {
+    let mut projections = format_supplementary_vcf_info(vf);
+    if !csq.is_empty() {
+        projections.push(("CSQ".to_string(), csq.to_string()));
+    }
+
+    let mut fields: Vec<String> = if original_info == "." || original_info.is_empty() {
+        Vec::new()
+    } else {
+        original_info
+            .split(';')
+            .filter(|field| {
+                let key = field.split_once('=').map_or(*field, |(key, _)| key);
+                !projections.iter().any(|(id, _)| id == key)
+            })
+            .map(ToOwned::to_owned)
+            .collect()
+    };
+
+    for (id, value) in projections {
+        fields.push(format!("{id}={value}"));
+    }
+
+    if fields.is_empty() {
+        ".".into()
+    } else {
+        fields.join(";")
+    }
+}
+
+fn format_spliceai_projection(vf: &VariationFeature) -> Option<String> {
+    let mut values = Vec::new();
+
+    for tv in &vf.transcript_variations {
+        for aa in &tv.allele_annotations {
+            let allele = uploaded_allele_for_annotation(vf, &aa.allele);
+            for (key, json_str) in &aa.supplementary {
+                if key != "spliceAI" {
+                    continue;
+                }
+                if let Some(value) = format_spliceai_entry(&allele, json_str) {
+                    if !values.contains(&value) {
+                        values.push(value);
+                    }
+                }
+            }
+        }
+    }
+
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.join(","))
+    }
+}
+
+fn format_spliceai_entry(allele: &str, json_str: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(json_str).ok()?;
+    let obj = value.as_object()?;
+    let gene = obj.get("gene")?.as_str()?;
+
+    Some(format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+        allele,
+        escape_spliceai_field(gene),
+        format_spliceai_float(obj.get("dsAg")?)?,
+        format_spliceai_float(obj.get("dsAl")?)?,
+        format_spliceai_float(obj.get("dsDg")?)?,
+        format_spliceai_float(obj.get("dsDl")?)?,
+        format_spliceai_int(obj.get("dpAg")?)?,
+        format_spliceai_int(obj.get("dpAl")?)?,
+        format_spliceai_int(obj.get("dpDg")?)?,
+        format_spliceai_int(obj.get("dpDl")?)?,
+    ))
+}
+
+fn format_spliceai_float(value: &Value) -> Option<String> {
+    value.as_f64().map(|v| format!("{:.2}", v))
+}
+
+fn format_spliceai_int(value: &Value) -> Option<String> {
+    if let Some(v) = value.as_i64() {
+        Some(v.to_string())
+    } else {
+        value.as_f64().map(|v| format!("{:.0}", v))
+    }
+}
+
+fn escape_spliceai_field(value: &str) -> String {
+    escape_vcf_subfield(value)
+}
+
+fn format_allele_projection(vf: &VariationFeature, spec: &VcfProjectionSpec) -> Option<String> {
+    let mut values = Vec::new();
+    for tv in &vf.transcript_variations {
+        for aa in &tv.allele_annotations {
+            let allele = uploaded_allele_for_annotation(vf, &aa.allele);
+            for (key, json_str) in &aa.supplementary {
+                if key != spec.json_key {
+                    continue;
+                }
+                let parsed = serde_json::from_str::<Value>(json_str).unwrap_or_else(|_| {
+                    Value::String(json_str.clone())
+                });
+                let entries = match spec.kind {
+                    VcfProjectionKind::AlleleScalar => {
+                        vec![format!("{}|{}", escape_vcf_subfield(&allele), json_value_to_vcf(&parsed))]
+                    }
+                    _ => format_object_projection_entries(&allele, &parsed, spec.fields),
+                };
+                for value in entries {
+                    if !values.contains(&value) {
+                        values.push(value);
+                    }
+                }
+            }
+        }
+    }
+    if values.is_empty() { None } else { Some(values.join(",")) }
+}
+
+fn format_gene_projection(vf: &VariationFeature, spec: &VcfProjectionSpec) -> Option<String> {
+    let mut values = Vec::new();
+    for ga in &vf.gene_annotations {
+        if ga.json_key != spec.json_key {
+            continue;
+        }
+        let Ok(parsed) = serde_json::from_str::<Value>(&ga.json_string) else {
+            continue;
+        };
+        let mut parts = Vec::with_capacity(spec.fields.len() + 1);
+        parts.push(escape_vcf_subfield(&ga.gene_symbol));
+        if let Some(obj) = parsed.as_object() {
+            for (_, json_key) in spec.fields {
+                parts.push(obj.get(*json_key).map(json_value_to_vcf).unwrap_or_default());
+            }
+        }
+        let value = parts.join("|");
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    if values.is_empty() { None } else { Some(values.join(",")) }
+}
+
+fn format_clinvar_protein_projection(
+    vf: &VariationFeature,
+    spec: &VcfProjectionSpec,
+) -> Option<String> {
+    let mut values = Vec::new();
+    for ga in &vf.gene_annotations {
+        if ga.json_key != spec.json_key {
+            continue;
+        }
+        let Ok(parsed) = serde_json::from_str::<Value>(&ga.json_string) else {
+            continue;
+        };
+        let variants = parsed
+            .get("proteinVariants")
+            .and_then(|v| v.as_array())
+            .map(|vars| {
+                vars.iter()
+                    .filter_map(|v| {
+                        let pos = v.get("pos").map(json_leaf_to_string)?;
+                        let ref_aa = v.get("refAa").map(json_leaf_to_string)?;
+                        let alt_aa = v.get("altAa").map(json_leaf_to_string)?;
+                        let sig = v.get("sig").map(json_leaf_to_string).unwrap_or_default();
+                        Some(escape_vcf_subfield(&format!("{pos}:{ref_aa}>{alt_aa}:{sig}")))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("&")
+            })
+            .unwrap_or_default();
+        if variants.is_empty() {
+            continue;
+        }
+        let value = format!("{}|{}", escape_vcf_subfield(&ga.gene_symbol), variants);
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
+    if values.is_empty() { None } else { Some(values.join(",")) }
+}
+
+fn format_object_projection_entries(
+    allele: &str,
+    value: &Value,
+    fields: &[(&str, &str)],
+) -> Vec<String> {
+    let values: Vec<&Value> = match value {
+        Value::Array(items) => items.iter().collect(),
+        _ => vec![value],
+    };
+    values
+        .into_iter()
+        .filter_map(|value| {
+            let obj = value.as_object()?;
+            let mut parts = Vec::with_capacity(fields.len() + 1);
+            parts.push(escape_vcf_subfield(allele));
+            for (_, json_key) in fields {
+                if json_key.is_empty() {
+                    parts.push(json_value_to_vcf(value));
+                } else {
+                    parts.push(obj.get(*json_key).map(json_value_to_vcf).unwrap_or_default());
+                }
+            }
+            Some(parts.join("|"))
+        })
+        .collect()
+}
+
+fn json_value_to_vcf(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Array(items) => items
+            .iter()
+            .map(json_value_to_vcf)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("&"),
+        Value::Object(_) => String::new(),
+        _ => escape_vcf_subfield(&json_leaf_to_string(value)),
+    }
+}
+
+fn json_leaf_to_string(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::Bool(v) => v.to_string(),
+        Value::Number(v) => v.to_string(),
+        Value::String(v) => v.clone(),
+        Value::Array(_) | Value::Object(_) => String::new(),
+    }
+}
+
+fn escape_vcf_subfield(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            ':' => escaped.push_str("%3A"),
+            ';' => escaped.push_str("%3B"),
+            '=' => escaped.push_str("%3D"),
+            '%' => escaped.push_str("%25"),
+            ',' => escaped.push_str("%2C"),
+            '\r' => escaped.push_str("%0D"),
+            '\n' => escaped.push_str("%0A"),
+            '\t' => escaped.push_str("%09"),
+            ' ' => escaped.push_str("%20"),
+            '"' => escaped.push_str("%22"),
+            '|' => escaped.push_str("%7C"),
+            '&' => escaped.push_str("%26"),
+            _ => escaped.push(c),
+        }
+    }
+    escaped
+}
+
+fn uploaded_allele_for_annotation(vf: &VariationFeature, allele: &Allele) -> String {
+    let allele_string = allele.to_string();
+    let Some(vcf) = &vf.vcf_fields else {
+        return allele_string;
+    };
+
+    let uploaded_alts: Vec<&str> = vcf.alt.split(',').collect();
+    vf.alt_alleles
+        .iter()
+        .position(|alt| alt == allele)
+        .and_then(|idx| uploaded_alts.get(idx).copied())
+        .unwrap_or(&allele_string)
+        .to_string()
 }
 
 /// Format a VariationFeature as a tab-delimited VEP output line.
@@ -681,6 +1228,12 @@ fn json_str(opt: &Option<String>) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::variant::{AlleleAnnotation, TranscriptVariation, VariationFeature};
+    use fastvep_core::{
+        Allele, Consequence, GeneAnnotation, GenomicPosition, Impact, Strand,
+        SupplementaryAnnotation, VariantType,
+    };
+    use std::sync::Arc;
 
     #[test]
     fn test_escape_csq_value() {
@@ -702,5 +1255,205 @@ mod tests {
         assert_eq!(format_position_range(Some((100, 100))), "100");
         assert_eq!(format_position_range(Some((100, 200))), "100-200");
         assert_eq!(format_position_range(None), "");
+    }
+
+    fn projection_test_variant() -> VariationFeature {
+        let supplementary = vec![
+            ("clinvar".into(), r#"{"significance":["Pathogenic","Likely_pathogenic"],"reviewStatus":"criteria_provided,_multiple_submitters,_no_conflicts","phenotypes":["Breast,cancer","Ovarian|cancer"],"variantClass":"SNV","soAccession":"SO:0001483"}"#.into()),
+            ("gnomad".into(), r#"{"allAf":1.2e-4,"allAc":12,"allAn":100000,"allHc":0,"afrAf":2.1e-4,"nfeAf":9.0e-5}"#.into()),
+            ("dbsnp".into(), r#"{"id":"rs123","globalMaf":0.042}"#.into()),
+            ("cosmic".into(), r#"{"id":"COSV123","gene":"GENE1","count":7}"#.into()),
+            ("oneKg".into(), r#"{"allAf":0.01,"afrAf":0.02,"amrAf":0.03,"easAf":0.04,"eurAf":0.05,"sasAf":0.06}"#.into()),
+            ("topmed".into(), r#"{"allAf":0.001,"allAc":4,"allAn":20000}"#.into()),
+            ("mitomap".into(), r#"{"disease":"MELAS;like","status":"Reported"}"#.into()),
+            ("phylop".into(), "3.14".into()),
+            ("gerp".into(), "-1.5".into()),
+            ("dann".into(), "0.99".into()),
+            ("revel".into(), r#"{"score":0.8123}"#.into()),
+            ("spliceAI".into(), r#"{"gene":"GENE|1","dsAg":0.01,"dsAl":0.0,"dsDg":0.85,"dsDl":0.0,"dpAg":5,"dpAl":-28,"dpDg":2,"dpDl":-13}"#.into()),
+            ("primateAI".into(), r#"{"score":0.4567}"#.into()),
+            ("dbnsfp".into(), r#"{"sift":"deleterious(0.010)","polyphen":"probably_damaging(0.980)"}"#.into()),
+        ];
+
+        VariationFeature {
+            position: GenomicPosition::new("1", 25000, 25000, Strand::Forward),
+            allele_string: "A/G".into(),
+            ref_allele: Allele::from_str("A"),
+            alt_alleles: vec![Allele::from_str("G")],
+            variation_name: None,
+            vcf_fields: None,
+            transcript_variations: vec![TranscriptVariation {
+                transcript_id: Arc::from("TX1"),
+                gene_id: Arc::from("GENE1"),
+                gene_symbol: Some(Arc::from("GENE1")),
+                biotype: Arc::from("protein_coding"),
+                allele_annotations: vec![AlleleAnnotation {
+                    allele: Allele::from_str("G"),
+                    consequences: vec![Consequence::MissenseVariant],
+                    impact: Impact::Moderate,
+                    cdna_position: None,
+                    cds_position: None,
+                    protein_position: None,
+                    amino_acids: None,
+                    codons: None,
+                    exon: None,
+                    intron: None,
+                    distance: None,
+                    hgvsc: None,
+                    hgvsp: None,
+                    hgvsg: None,
+                    hgvs_offset: None,
+                    existing_variation: Vec::new(),
+                    sift: None,
+                    polyphen: None,
+                    supplementary,
+                    acmg_classification: None,
+                }],
+                canonical: false,
+                strand: Strand::Forward,
+                source: None,
+                protein_id: None,
+                mane_select: None,
+                mane_plus_clinical: None,
+                tsl: None,
+                appris: None,
+                ccds: None,
+                gencode_primary: false,
+                symbol_source: None,
+                hgnc_id: None,
+                flags: Vec::new(),
+            }],
+            existing_variants: Vec::new(),
+            minimised: false,
+            most_severe_consequence: None,
+            variant_type: VariantType::Snv,
+            sv_end: None,
+            sv_len: None,
+            supplementary_annotations: vec![SupplementaryAnnotation {
+                json_key: "customVariant".into(),
+                is_array: false,
+                json_string: r#"{"note":"top-level"}"#.into(),
+            }],
+            gene_annotations: vec![
+                GeneAnnotation {
+                    gene_symbol: "GENE1".into(),
+                    json_key: "omim".into(),
+                    json_string: r#"{"mimNumber":113705,"phenotypes":["Breast cancer","Ovarian,cancer"]}"#.into(),
+                },
+                GeneAnnotation {
+                    gene_symbol: "GENE1".into(),
+                    json_key: "gnomad_genes".into(),
+                    json_string: r#"{"pLI":1.0,"loeuf":0.03,"misZ":3.45,"synZ":0.12}"#.into(),
+                },
+                GeneAnnotation {
+                    gene_symbol: "GENE1".into(),
+                    json_key: "clinvar_protein".into(),
+                    json_string: r#"{"proteinVariants":[{"pos":175,"refAa":"R","altAa":"H","sig":"Pathogenic"}]}"#.into(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn vcf_projection_emits_supported_fastsa_sources_without_json_payloads() {
+        let vf = projection_test_variant();
+        let projections = format_supplementary_vcf_info(&vf);
+        let ids: Vec<&str> = projections.iter().map(|(id, _)| id.as_str()).collect();
+
+        for expected in [
+            "FV_CLINVAR",
+            "FV_GNOMAD",
+            "FV_DBSNP",
+            "FV_COSMIC",
+            "FV_1KG",
+            "FV_TOPMED",
+            "FV_MITOMAP",
+            "FV_PHYLOP",
+            "FV_GERP",
+            "FV_DANN",
+            "FV_REVEL",
+            "SpliceAI",
+            "FV_PRIMATEAI",
+            "FV_DBNSFP",
+            "FV_OMIM",
+            "FV_GNOMAD_GENE",
+            "FV_CLINVAR_PROTEIN",
+        ] {
+            assert!(ids.contains(&expected), "missing projection {expected}: {projections:?}");
+        }
+
+        let info = projections
+            .iter()
+            .map(|(id, value)| format!("{id}={value}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        assert!(!info.contains('{'), "VCF INFO must not contain JSON objects: {info}");
+        assert!(!info.contains('}'), "VCF INFO must not contain JSON objects: {info}");
+        assert!(!info.contains('"'), "VCF INFO must not contain JSON quotes: {info}");
+        assert!(info.contains("SpliceAI=G|GENE%7C1|0.01|0.00|0.85|0.00|5|-28|2|-13"));
+        assert!(info.contains("FV_CLINVAR=G|Pathogenic&Likely_pathogenic|criteria_provided%2C_multiple_submitters%2C_no_conflicts|Breast%2Ccancer&Ovarian%7Ccancer|SNV|SO%3A0001483"));
+        assert!(info.contains("FV_PHYLOP=G|3.14"));
+        assert!(info.contains("FV_REVEL=G|0.8123"));
+        assert!(info.contains("FV_PRIMATEAI=G|0.4567"));
+        assert!(info.contains("FV_OMIM=GENE1|113705|Breast%20cancer&Ovarian%2Ccancer"));
+        assert!(info.contains("FV_CLINVAR_PROTEIN=GENE1|175%3AR>H%3APathogenic"));
+    }
+
+    #[test]
+    fn vcf_info_replaces_existing_fastvep_owned_fields() {
+        let vf = projection_test_variant();
+        let csq = "G|missense_variant|MODERATE";
+        let info = format_vcf_info_fields(
+            "DP=12;CSQ=old;SpliceAI=old;FV_CLINVAR=old;KEEP=1",
+            &vf,
+            csq,
+        );
+
+        assert!(info.contains("DP=12"));
+        assert!(info.contains("KEEP=1"));
+        assert!(info.contains("CSQ=G|missense_variant|MODERATE"));
+        assert!(info.contains("SpliceAI=G|GENE%7C1|0.01|0.00|0.85|0.00|5|-28|2|-13"));
+        assert!(info.contains("FV_CLINVAR=G|Pathogenic&Likely_pathogenic"));
+        assert!(!info.contains("CSQ=old"));
+        assert!(!info.contains("SpliceAI=old"));
+        assert!(!info.contains("FV_CLINVAR=old"));
+    }
+
+    #[test]
+    fn vcf_projection_uses_uploaded_indel_alt_allele() {
+        let mut vf = projection_test_variant();
+        vf.position.start = 26001;
+        vf.position.end = 26001;
+        vf.ref_allele = Allele::from_str("A");
+        vf.alt_alleles = vec![Allele::Deletion];
+        vf.allele_string = "A/-".into();
+        vf.vcf_fields = Some(crate::variant::VcfFields {
+            chrom: "1".into(),
+            pos: 26000,
+            id: ".".into(),
+            ref_allele: "GA".into(),
+            alt: "G".into(),
+            qual: ".".into(),
+            filter: ".".into(),
+            info: ".".into(),
+            rest: Vec::new(),
+        });
+        let aa = &mut vf.transcript_variations[0].allele_annotations[0];
+        aa.allele = Allele::Deletion;
+        aa.supplementary = vec![(
+            "spliceAI".into(),
+            r#"{"gene":"GENE1","dsAg":0.1,"dsAl":0.0,"dsDg":0.0,"dsDl":0.0,"dpAg":4,"dpAl":7,"dpDg":27,"dpDl":17}"#.into(),
+        )];
+
+        let info = format_supplementary_vcf_info(&vf)
+            .into_iter()
+            .map(|(id, value)| format!("{id}={value}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        assert!(
+            info.contains("SpliceAI=G|GENE1|0.10|0.00|0.00|0.00|4|7|27|17"),
+            "{info}"
+        );
+        assert!(!info.contains("SpliceAI=-|"), "{info}");
     }
 }

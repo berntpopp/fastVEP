@@ -6,6 +6,7 @@
 use crate::common::AnnotationRecord;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::io::BufRead;
 
 /// Parse a SpliceAI VCF and produce sorted AnnotationRecords.
@@ -16,48 +17,81 @@ pub fn parse_spliceai_vcf<R: BufRead>(
     reader: R,
     chrom_to_idx: &HashMap<String, u16>,
 ) -> Result<Vec<AnnotationRecord>> {
-    let mut records = Vec::new();
+    let mut records: Vec<_> = iter_spliceai_vcf(reader, chrom_to_idx).collect::<Result<_>>()?;
+    records.sort_by(|a, b| a.chrom_idx.cmp(&b.chrom_idx).then(a.position.cmp(&b.position)));
+    Ok(records)
+}
 
-    for line in reader.lines() {
-        let line = line.context("Reading SpliceAI VCF line")?;
-        if line.starts_with('#') {
-            continue;
-        }
+/// Stream a coordinate-sorted SpliceAI VCF as AnnotationRecords.
+///
+/// This avoids retaining the whole genome-wide SpliceAI VCF in memory before
+/// writing fastSA. The input must already be sorted by chromosome and position.
+pub fn iter_spliceai_vcf<'a, R: BufRead>(
+    reader: R,
+    chrom_to_idx: &'a HashMap<String, u16>,
+) -> SpliceAiRecordIter<'a, R> {
+    SpliceAiRecordIter {
+        lines: reader.lines(),
+        chrom_to_idx,
+        pending: VecDeque::new(),
+    }
+}
 
-        let fields: Vec<&str> = line.splitn(9, '\t').collect();
-        if fields.len() < 8 {
-            continue;
-        }
+pub struct SpliceAiRecordIter<'a, R: BufRead> {
+    lines: std::io::Lines<R>,
+    chrom_to_idx: &'a HashMap<String, u16>,
+    pending: VecDeque<AnnotationRecord>,
+}
 
-        let chrom = normalize_chrom(fields[0]);
-        let chrom_idx = match chrom_to_idx.get(&chrom) {
-            Some(&idx) => idx,
-            None => continue,
-        };
+impl<R: BufRead> Iterator for SpliceAiRecordIter<'_, R> {
+    type Item = Result<AnnotationRecord>;
 
-        let pos: u32 = match fields[1].parse() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(record) = self.pending.pop_front() {
+                return Some(Ok(record));
+            }
 
-        let ref_allele = fields[3].to_string();
-        let info = fields[7];
+            let line = match self.lines.next()? {
+                Ok(line) => line,
+                Err(err) => return Some(Err(err).context("Reading SpliceAI VCF line")),
+            };
+            if line.starts_with('#') {
+                continue;
+            }
 
-        // Extract SpliceAI annotations from INFO
-        for pair in info.split(';') {
-            if let Some(val) = pair.strip_prefix("SpliceAI=") {
-                // Can have multiple allele annotations separated by comma
-                for entry in val.split(',') {
-                    if let Some(record) = parse_spliceai_entry(chrom_idx, pos, &ref_allele, entry) {
-                        records.push(record);
+            let fields: Vec<&str> = line.splitn(9, '\t').collect();
+            if fields.len() < 8 {
+                continue;
+            }
+
+            let chrom = normalize_chrom(fields[0]);
+            let chrom_idx = match self.chrom_to_idx.get(&chrom) {
+                Some(&idx) => idx,
+                None => continue,
+            };
+
+            let pos: u32 = match fields[1].parse() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            let ref_allele = fields[3].to_string();
+            let info = fields[7];
+
+            for pair in info.split(';') {
+                if let Some(val) = pair.strip_prefix("SpliceAI=") {
+                    for entry in val.split(',') {
+                        if let Some(record) =
+                            parse_spliceai_entry(chrom_idx, pos, &ref_allele, entry)
+                        {
+                            self.pending.push_back(record);
+                        }
                     }
                 }
             }
         }
     }
-
-    records.sort_by(|a, b| a.chrom_idx.cmp(&b.chrom_idx).then(a.position.cmp(&b.position)));
-    Ok(records)
 }
 
 fn parse_spliceai_entry(
@@ -82,10 +116,18 @@ fn parse_spliceai_entry(
     let dp_dg: i32 = parts[8].parse().ok()?;
     let dp_dl: i32 = parts[9].parse().ok()?;
 
-    let json = format!(
-        r#"{{"gene":"{}","dsAg":{:.2},"dsAl":{:.2},"dsDg":{:.2},"dsDl":{:.2},"dpAg":{},"dpAl":{},"dpDg":{},"dpDl":{}}}"#,
-        gene, ds_ag, ds_al, ds_dg, ds_dl, dp_ag, dp_al, dp_dg, dp_dl
-    );
+    let json = serde_json::json!({
+        "gene": gene,
+        "dsAg": ds_ag,
+        "dsAl": ds_al,
+        "dsDg": ds_dg,
+        "dsDl": ds_dl,
+        "dpAg": dp_ag,
+        "dpAl": dp_al,
+        "dpDg": dp_dg,
+        "dpDl": dp_dl,
+    })
+    .to_string();
 
     Some(AnnotationRecord {
         chrom_idx,
@@ -125,15 +167,60 @@ mod tests {
 
         assert_eq!(records[0].position, 25000);
         assert_eq!(records[0].alt_allele, "G");
-        assert!(records[0].json.contains("GENE1"));
-        assert!(records[0].json.contains("\"dsDg\":0.85"));
+        let first: serde_json::Value = serde_json::from_str(&records[0].json).unwrap();
+        assert_eq!(first["gene"], "GENE1");
+        assert_eq!(first["dsDg"], 0.85);
 
         assert_eq!(records[1].position, 30000);
         assert_eq!(records[1].alt_allele, "T");
-        assert!(records[1].json.contains("\"dsDl\":0.92"));
+        let second: serde_json::Value = serde_json::from_str(&records[1].json).unwrap();
+        assert_eq!(second["dsDl"], 0.92);
 
         assert_eq!(records[2].position, 30000);
         assert_eq!(records[2].alt_allele, "A");
-        assert!(records[2].json.contains("\"dsAg\":0.50"));
+        let third: serde_json::Value = serde_json::from_str(&records[2].json).unwrap();
+        assert_eq!(third["dsAg"], 0.50);
+    }
+
+    #[test]
+    fn test_iter_spliceai_vcf_streams_records() {
+        let vcf = "\
+##fileformat=VCFv4.0
+##INFO=<ID=SpliceAI,Number=.,Type=String>
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO
+1\t25000\t.\tA\tG\t.\t.\tSpliceAI=G|GENE1|0.01|0.00|0.85|0.00|5|-28|2|-13
+1\t30000\t.\tC\tT,A\t.\t.\tSpliceAI=T|GENE2|0.00|0.10|0.00|0.92|3|-5|10|-2,A|GENE2|0.50|0.00|0.00|0.00|7|0|0|0
+";
+        let mut chrom_map = HashMap::new();
+        chrom_map.insert("chr1".into(), 0u16);
+
+        let records: Vec<_> = iter_spliceai_vcf(vcf.as_bytes(), &chrom_map)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].position, 25000);
+        assert_eq!(records[0].alt_allele, "G");
+        assert_eq!(records[1].position, 30000);
+        assert_eq!(records[1].alt_allele, "T");
+        assert_eq!(records[2].position, 30000);
+        assert_eq!(records[2].alt_allele, "A");
+    }
+
+    #[test]
+    fn test_parse_spliceai_vcf_escapes_gene_for_json() {
+        let vcf = "\
+##fileformat=VCFv4.0
+##INFO=<ID=SpliceAI,Number=.,Type=String>
+#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO
+1\t25000\t.\tA\tG\t.\t.\tSpliceAI=G|GENE\"1|0.01|0.00|0.85|0.00|5|-28|2|-13
+";
+        let mut chrom_map = HashMap::new();
+        chrom_map.insert("chr1".into(), 0u16);
+
+        let records = parse_spliceai_vcf(vcf.as_bytes(), &chrom_map).unwrap();
+        assert_eq!(records.len(), 1);
+        let value: serde_json::Value = serde_json::from_str(&records[0].json).unwrap();
+        assert_eq!(value["gene"], "GENE\"1");
     }
 }

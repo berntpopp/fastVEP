@@ -1,0 +1,5 @@
+##gff-version 3
+1	ensembl	gene	24000	31000	.	+	.	ID=gene:GENE1;Name=GENE1;gene_name=GENE1
+1	ensembl	mRNA	24000	31000	.	+	.	ID=transcript:TX1;Parent=gene:GENE1;biotype=protein_coding;tag=Ensembl_canonical
+1	ensembl	exon	24000	31000	.	+	.	ID=exon:EX1;Parent=transcript:TX1;rank=1
+1	ensembl	CDS	24000	31000	.	+	0	ID=CDS:PROT1;Parent=transcript:TX1

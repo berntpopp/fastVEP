@@ -363,7 +363,9 @@ IMPACT is HIGH and AF < 0.01
 
 ### VCF Output
 
-Annotations are added as a `CSQ` field in the INFO column with 47 pipe-delimited fields matching Ensembl VEP's extended format.
+Consequence annotations are added as a `CSQ` field in the INFO column with 47 pipe-delimited fields matching Ensembl VEP's extended format. When supplementary annotation databases are loaded with `--sa-dir`, fastVEP also emits VCF-compatible INFO projections for supported fastSA sources: standard `SpliceAI` for SpliceAI databases, and fastVEP-specific `FV_*` fields such as `FV_CLINVAR`, `FV_GNOMAD`, `FV_DBSNP`, `FV_REVEL`, and gene-level `FV_OMIM`.
+
+The VCF output never embeds raw JSON in INFO values. Use `--output-format json` for the richest structured representation of all supplementary annotation objects.
 
 ### Tab Output
 

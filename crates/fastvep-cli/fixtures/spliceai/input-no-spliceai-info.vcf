@@ -1,0 +1,4 @@
+##fileformat=VCFv4.2
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+1	25000	.	A	G	.	.	.
+1	30000	.	C	T,A	.	.	.

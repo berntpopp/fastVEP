@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use flate2::read::MultiGzDecoder;
-use fastvep_cache::annotation::{AnnotationProvider, AnnotationValue};
+use fastvep_cache::annotation::{AnnotationProvider, AnnotationValue, GeneAnnotationProvider};
 use fastvep_cache::fasta::FastaReader;
 use fastvep_cache::gff::parse_gff3;
 use fastvep_cache::info::CacheInfo;
@@ -281,15 +281,32 @@ pub fn run_annotate(config: AnnotateConfig) -> Result<()> {
         )
     };
     let mut writer = BufWriter::new(output_writer);
+    let sa_json_keys: Vec<String> = sa_providers
+        .iter()
+        .map(|sa| sa.json_key().to_string())
+        .collect();
+    let gene_json_keys: Vec<String> = gene_providers
+        .iter()
+        .map(|gp| gp.json_key().to_string())
+        .collect();
+    let owned_vcf_info_ids = output::vcf_owned_info_ids(&sa_json_keys, &gene_json_keys);
+    let generated_vcf_headers =
+        output::vcf_info_header_lines(&sa_json_keys, &gene_json_keys, output::DEFAULT_CSQ_FIELDS);
 
     // Write headers based on output format
     match config.output_format.as_str() {
         "vcf" => {
             // Pass through original VCF headers
             for header_line in vcf_parser.header_lines() {
+                if let Some(info_id) = output::vcf_info_header_id(header_line) {
+                    if owned_vcf_info_ids.iter().any(|owned| *owned == info_id) {
+                        continue;
+                    }
+                }
                 if header_line.starts_with("#CHROM") {
-                    // Insert CSQ header before #CHROM
-                    writeln!(writer, "{}", output::csq_header_line(output::DEFAULT_CSQ_FIELDS))?;
+                    for generated in &generated_vcf_headers {
+                        writeln!(writer, "{}", generated)?;
+                    }
                 }
                 writeln!(writer, "{}", header_line)?;
             }
@@ -377,10 +394,15 @@ pub fn run_annotate(config: AnnotateConfig) -> Result<()> {
             // Collect all positions in this batch, grouped by chromosome
             let mut chrom_positions: HashMap<&str, Vec<u64>> = HashMap::new();
             for (vf, _) in &batch {
-                chrom_positions
+                let positions = chrom_positions
                     .entry(&vf.position.chromosome)
-                    .or_default()
-                    .push(vf.position.start);
+                    .or_default();
+                positions.push(vf.position.start);
+                if let Some(vcf) = &vf.vcf_fields {
+                    if vcf.pos != vf.position.start {
+                        positions.push(vcf.pos);
+                    }
+                }
             }
             for sa in &sa_providers {
                 for (chrom, positions) in &chrom_positions {
@@ -904,13 +926,27 @@ pub fn run_annotate(config: AnnotateConfig) -> Result<()> {
             // Supplementary annotation: query SA providers for each allele
             if !sa_providers.is_empty() {
                 let chrom = &vf.position.chromosome;
+                let sa_queries = supplementary_query_alleles(vf);
                 for tv in &mut vf.transcript_variations {
                     for aa in &mut tv.allele_annotations {
-                        let alt_str = aa.allele.to_string();
-                        let ref_str = vf.ref_allele.to_string();
+                        let allele_key = aa.allele.to_string();
+                        let (query_pos, ref_str, alt_str) = sa_queries
+                            .iter()
+                            .find(|(allele, _, _, _)| allele == &allele_key)
+                            .map(|(_, pos, ref_allele, alt_allele)| {
+                                (*pos, ref_allele.clone(), alt_allele.clone())
+                            })
+                            .unwrap_or_else(|| {
+                                (vf.position.start, vf.ref_allele.to_string(), allele_key)
+                            });
                         for sa in &sa_providers {
+                            let (sa_pos, sa_ref, sa_alt) = if sa.metadata().match_by_allele {
+                                (query_pos, ref_str.as_str(), alt_str.as_str())
+                            } else {
+                                (vf.position.start, "", "")
+                            };
                             if let Ok(Some(ann)) =
-                                sa.annotate_position(chrom, vf.position.start, &ref_str, &alt_str)
+                                sa.annotate_position(chrom, sa_pos, sa_ref, sa_alt)
                             {
                                 let json_str = match ann {
                                     AnnotationValue::Json(j) => j,
@@ -1310,16 +1346,46 @@ fn enrich_compound_het_batch(
     }
 }
 
+fn supplementary_query_alleles(vf: &VariationFeature) -> Vec<(String, u64, String, String)> {
+    if let Some(vcf) = &vf.vcf_fields {
+        let uploaded_alts: Vec<&str> = vcf.alt.split(',').collect();
+        return vf
+            .alt_alleles
+            .iter()
+            .enumerate()
+            .map(|(idx, allele)| {
+                let allele_string = allele.to_string();
+                (
+                    allele_string.clone(),
+                    vcf.pos,
+                    vcf.ref_allele.clone(),
+                    uploaded_alts
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(&allele_string)
+                        .to_string(),
+                )
+            })
+            .collect();
+    }
+
+    vf.alt_alleles
+        .iter()
+        .map(|allele| {
+            (
+                allele.to_string(),
+                vf.position.start,
+                vf.ref_allele.to_string(),
+                allele.to_string(),
+            )
+        })
+        .collect()
+}
+
 fn write_vcf_line(writer: &mut impl Write, vf: &VariationFeature) -> Result<()> {
     if let Some(ref fields) = vf.vcf_fields {
         let csq = output::format_csq(vf, output::DEFAULT_CSQ_FIELDS);
-        let info = if fields.info == "." && !csq.is_empty() {
-            format!("CSQ={}", csq)
-        } else if !csq.is_empty() {
-            format!("{};CSQ={}", fields.info, csq)
-        } else {
-            fields.info.clone()
-        };
+        let info = output::format_vcf_info_fields(&fields.info, vf, &csq);
 
         write!(
             writer,
@@ -1748,6 +1814,29 @@ pub fn run_sa_build(source: &str, input: &str, output: &str, assembly: &str) -> 
     };
     let buf_reader = io::BufReader::new(reader);
 
+    if source == "spliceai" {
+        let output_path = Path::new(output);
+        let mut writer = SaWriter::new(header);
+        let mut record_count = 0usize;
+        let records = fastvep_sa::sources::spliceai::iter_spliceai_vcf(buf_reader, &chrom_map)
+            .map(|record| {
+                if record.is_ok() {
+                    record_count += 1;
+                }
+                record
+            });
+        writer.write_results_to_files(output_path, records, &chrom_list)?;
+
+        eprintln!("Parsed {} records from {}", record_count, source);
+        eprintln!(
+            "Wrote: {} and {}",
+            output_path.with_extension("osa").display(),
+            output_path.with_extension("osa.idx").display()
+        );
+
+        return Ok(());
+    }
+
     let records = match source {
         "clinvar" => fastvep_sa::sources::clinvar::parse_clinvar_vcf(buf_reader, &chrom_map)?,
         "gnomad" => fastvep_sa::sources::gnomad::parse_gnomad_vcf(buf_reader, &chrom_map)?,
@@ -1762,7 +1851,6 @@ pub fn run_sa_build(source: &str, input: &str, output: &str, assembly: &str) -> 
         "phylop" => parse_phylop_auto(buf_reader, &chrom_map)?,
         "gerp" | "dann" => fastvep_sa::sources::scores::parse_score_tsv(buf_reader, &chrom_map, false)?,
         "revel" => fastvep_sa::sources::revel::parse_revel(buf_reader, &chrom_map, 2)?,
-        "spliceai" => fastvep_sa::sources::spliceai::parse_spliceai_vcf(buf_reader, &chrom_map)?,
         "primateai" => fastvep_sa::sources::primateai::parse_primateai(buf_reader, &chrom_map)?,
         "dbnsfp" => fastvep_sa::sources::dbnsfp::parse_dbnsfp(buf_reader, &chrom_map)?,
         _ => unreachable!(),

@@ -18,6 +18,15 @@ pub const DEFAULT_BLOCK_SIZE: usize = 8 * 1024 * 1024;
 /// Default zstd compression level (3 is a good speed/ratio tradeoff).
 pub const ZSTD_LEVEL: i32 = 3;
 
+/// Hard cap on a single bincode-serialized index payload (4 GiB). Used by
+/// `.osa.idx`, `.osi`, and `.oga` readers to refuse malformed/malicious files
+/// that claim absurd payload sizes, before allocating a buffer.
+///
+/// Stored as `u64` so the literal compiles on 32-bit targets (where
+/// `usize` is 32 bits and cannot hold `2^32`). Readers must additionally
+/// verify the value fits in `usize` before allocating.
+pub const MAX_INDEX_PAYLOAD: u64 = 4 * 1024 * 1024 * 1024;
+
 /// File extension for position/allele-level annotations.
 pub const OSA_EXT: &str = "osa";
 

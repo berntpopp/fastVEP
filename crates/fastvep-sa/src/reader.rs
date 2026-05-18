@@ -74,10 +74,16 @@ impl SaReader {
 
     /// Read and decompress a block at the given file offset.
     fn read_block(&self, file_offset: u64, compressed_len: u32) -> Result<Vec<BlockEntry>> {
-        let offset = file_offset as usize;
+        let offset: usize = file_offset
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Block offset {} too large for usize", file_offset))?;
         // The data file stores: [4-byte compressed_len] [compressed_data]
-        let data_start = offset + 4;
-        let data_end = data_start + compressed_len as usize;
+        let data_start = offset
+            .checked_add(4)
+            .ok_or_else(|| anyhow::anyhow!("Block offset overflow"))?;
+        let data_end = data_start
+            .checked_add(compressed_len as usize)
+            .ok_or_else(|| anyhow::anyhow!("Block end offset overflow"))?;
 
         if data_end > self.mmap.len() {
             anyhow::bail!("Block extends beyond data file");
@@ -151,16 +157,39 @@ impl AnnotationProvider for SaReader {
     }
 
     fn preload(&self, chrom: &str, positions: &[u64]) -> Result<()> {
-        if positions.is_empty() {
-            return Ok(());
-        }
+        // Compute min/max in a single pass and avoid panic-prone unwraps.
+        let (min_pos_u64, max_pos_u64) = match positions.split_first() {
+            Some((&first, rest)) => rest
+                .iter()
+                .fold((first, first), |(mn, mx), &p| (mn.min(p), mx.max(p))),
+            None => return Ok(()),
+        };
 
-        let chrom_idx = self.chrom_map.get(chrom).unwrap_or(255);
         let cache = unsafe { &mut *self.preloaded.get() };
         cache.clear();
 
-        let min_pos = *positions.iter().min().unwrap() as u32;
-        let max_pos = *positions.iter().max().unwrap() as u32;
+        // If the chromosome isn't in our standard map, skip caching: the
+        // cache key would collide for any other unknown chromosome.
+        let chrom_idx = match self.chrom_map.get(chrom) {
+            Some(idx) => idx,
+            None => {
+                log::debug!("preload: skipping unknown chromosome '{}'", chrom);
+                return Ok(());
+            }
+        };
+
+        // u32 positions are required by the on-disk format; bail loudly
+        // rather than silently truncating.
+        let max_u32 = u32::MAX as u64;
+        if max_pos_u64 > max_u32 {
+            anyhow::bail!("Position {} exceeds u32::MAX", max_pos_u64);
+        }
+        let min_pos: u32 = min_pos_u64
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Position {} exceeds u32::MAX", min_pos_u64))?;
+        let max_pos: u32 = max_pos_u64
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Position {} exceeds u32::MAX", max_pos_u64))?;
 
         let block_refs = self.index.find_blocks_range(chrom, min_pos, max_pos);
 

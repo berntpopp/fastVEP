@@ -53,13 +53,46 @@ fn default_missing_string() -> String { ".".into() }
 
 impl Field {
     /// Encode a float value as a u32 using this field's multiplier.
+    ///
+    /// Non-finite inputs (NaN, +/-Inf) — and scalings that overflow to
+    /// non-finite — map to the field's `missing_value`. Finite scaled values
+    /// are clamped into the storable range: `[0, u32::MAX]` for non-zigzag
+    /// (or `[0, u32::MAX - 1]` when the missing sentinel is `u32::MAX`) and
+    /// `[i32::MIN, i32::MAX]` for zigzag (with `i32::MIN` excluded when the
+    /// missing sentinel is `u32::MAX`, since its zigzag encoding collides).
+    /// Without this guard, `f64 as u32` would silently produce 0 for NaN and
+    /// saturate to `u32::MAX` for huge values — which collides with the
+    /// default missing sentinel and corrupts data.
     #[inline]
     pub fn encode_float(&self, value: f64) -> u32 {
+        if !value.is_finite() {
+            return self.missing_value;
+        }
         let scaled = value * self.multiplier as f64;
+        if !scaled.is_finite() {
+            return self.missing_value;
+        }
         if self.zigzag {
-            crate::zigzag::encode(scaled as i32)
+            // Clamp into i32 range before zigzag-encoding signed values.
+            // When the missing sentinel is u32::MAX, reserve it by excluding
+            // i32::MIN, whose zigzag encoding is also u32::MAX.
+            let min_storable = if self.missing_value == u32::MAX {
+                (i32::MIN + 1) as f64
+            } else {
+                i32::MIN as f64
+            };
+            let clamped = scaled.clamp(min_storable, i32::MAX as f64) as i32;
+            crate::zigzag::encode(clamped)
         } else {
-            scaled as u32
+            // Saturate in u32 range. Avoid colliding with the missing sentinel
+            // when the field uses u32::MAX as its missing value.
+            let max_storable = if self.missing_value == u32::MAX {
+                (u32::MAX - 1) as f64
+            } else {
+                u32::MAX as f64
+            };
+            let bounded = scaled.clamp(0.0, max_storable);
+            bounded as u32
         }
     }
 
@@ -74,16 +107,39 @@ impl Field {
         } else {
             stored as f64
         };
-        raw / self.multiplier as f64
+        let m = self.multiplier as f64;
+        if m == 0.0 { raw } else { raw / m }
     }
 
     /// Encode an integer value, optionally with zigzag.
+    ///
+    /// For zigzag fields, the value is clamped into `[i32::MIN, i32::MAX]`
+    /// before encoding (with `i32::MIN` excluded when the missing sentinel is
+    /// `u32::MAX`, since its zigzag encoding collides with the sentinel).
+    ///
+    /// For non-zigzag fields, negative inputs or values exceeding `u32::MAX`
+    /// are returned as `missing_value` rather than silently wrapping into a
+    /// large unrelated `u32`.
     #[inline]
     pub fn encode_int(&self, value: i64) -> u32 {
         if self.zigzag {
-            crate::zigzag::encode(value as i32)
+            // When the missing sentinel is u32::MAX, zigzag-encoding i32::MIN
+            // would collide with that sentinel. Clamp away from i32::MIN so we
+            // never need to remap the encoded value onto another valid extreme.
+            let min = if self.missing_value == u32::MAX {
+                (i32::MIN as i64) + 1
+            } else {
+                i32::MIN as i64
+            };
+            let clamped = value.clamp(min, i32::MAX as i64) as i32;
+            crate::zigzag::encode(clamped)
         } else {
-            value as u32
+            // Treat negatives or overflow as missing rather than silently wrapping.
+            if value < 0 || value > u32::MAX as i64 {
+                self.missing_value
+            } else {
+                value as u32
+            }
         }
     }
 
@@ -177,6 +233,44 @@ mod tests {
         };
         assert!(field.decode_float(u32::MAX).is_nan());
         assert_eq!(format_value(&field, u32::MAX, None), "null");
+    }
+
+    #[test]
+    fn test_encode_nan_and_inf_become_missing() {
+        let field = Field {
+            field: "AF".into(), alias: "af".into(), ftype: FieldType::Float,
+            multiplier: 2_000_000, zigzag: false, missing_value: u32::MAX,
+            missing_string: ".".into(), description: String::new(),
+        };
+        assert_eq!(field.encode_float(f64::NAN), u32::MAX);
+        assert_eq!(field.encode_float(f64::INFINITY), u32::MAX);
+        assert_eq!(field.encode_float(f64::NEG_INFINITY), u32::MAX);
+    }
+
+    #[test]
+    fn test_encode_saturation_does_not_collide_with_missing() {
+        // Without bounds, value * multiplier may saturate to u32::MAX and
+        // collide with the default missing sentinel.
+        let field = Field {
+            field: "x".into(), alias: "x".into(), ftype: FieldType::Float,
+            multiplier: 2_000_000, zigzag: false, missing_value: u32::MAX,
+            missing_string: ".".into(), description: String::new(),
+        };
+        let encoded = field.encode_float(1e30);
+        assert_ne!(encoded, u32::MAX, "saturation must not collide with missing");
+        assert!(encoded < u32::MAX);
+    }
+
+    #[test]
+    fn test_encode_int_negative_without_zigzag_treated_missing() {
+        let field = Field {
+            field: "n".into(), alias: "n".into(), ftype: FieldType::Integer,
+            multiplier: 1, zigzag: false, missing_value: u32::MAX,
+            missing_string: ".".into(), description: String::new(),
+        };
+        assert_eq!(field.encode_int(-5), u32::MAX);
+        assert_eq!(field.encode_int(0), 0);
+        assert_eq!(field.encode_int(42), 42);
     }
 
     #[test]

@@ -12,7 +12,12 @@ pub struct Chunk {
     pub var32s: Vec<u32>,
     /// Long variants (ref+alt > 4 bases) sorted for binary search.
     pub longs: Vec<LongVariant>,
-    /// Parallel value arrays: `values[field_idx][variant_idx]`.
+    /// Parallel value arrays, one per non-JsonBlob field in field-config order:
+    /// `values[non_jsonblob_position][variant_idx]`. JsonBlob fields do not
+    /// contribute a column here (their payloads live in `json_blobs`), so this
+    /// vector is shorter than `fields.len()` whenever any JsonBlob is present.
+    /// `reconstruct_json` tracks a separate counter that advances only for
+    /// non-JsonBlob fields when indexing into this array.
     pub values: Vec<Vec<u32>>,
     /// Optional JSON blob strings for JsonBlob fields.
     pub json_blobs: Option<Vec<String>>,
@@ -50,6 +55,10 @@ impl Chunk {
     }
 
     /// Reconstruct a JSON string from parallel value arrays at the given index.
+    ///
+    /// `values` is parallel only to non-JsonBlob fields (in field-config order),
+    /// so we maintain a separate `value_idx` that advances only for those.
+    /// `strings` is parallel to all fields, so it uses the field index.
     pub fn reconstruct_json(
         &self,
         idx: usize,
@@ -57,6 +66,7 @@ impl Chunk {
         strings: &[Vec<String>],
     ) -> String {
         let mut parts = Vec::with_capacity(fields.len());
+        let mut value_idx: usize = 0;
 
         for (fi, field) in fields.iter().enumerate() {
             if field.ftype == FieldType::JsonBlob {
@@ -68,11 +78,19 @@ impl Chunk {
                 continue;
             }
 
-            if fi >= self.values.len() || idx >= self.values[fi].len() {
-                continue;
-            }
+            let column = match self.values.get(value_idx) {
+                Some(c) => c,
+                None => {
+                    value_idx += 1;
+                    continue;
+                }
+            };
+            value_idx += 1;
 
-            let stored = self.values[fi][idx];
+            let stored = match column.get(idx) {
+                Some(&s) => s,
+                None => continue,
+            };
             if stored == field.missing_value {
                 continue; // Skip missing values in output
             }
@@ -155,6 +173,41 @@ mod tests {
         // Should NOT find position 55 (not in our set)
         let query = var32::encode(55, b"A", b"G").unwrap();
         assert!(chunk.find_short(query).is_none());
+    }
+
+    #[test]
+    fn test_chunk_reconstruct_json_with_jsonblob_in_middle() {
+        // Regression: previously `values[fi]` indexed by the field-config
+        // position, which silently dropped any non-JsonBlob field that came
+        // after a JsonBlob field. Verify the trailing Integer is emitted.
+        let fields = vec![
+            Field {
+                field: "AF".into(), alias: "af".into(), ftype: FieldType::Float,
+                multiplier: 1_000_000, zigzag: false, missing_value: u32::MAX,
+                missing_string: ".".into(), description: String::new(),
+            },
+            Field {
+                field: "blob".into(), alias: "blob".into(), ftype: FieldType::JsonBlob,
+                multiplier: 1, zigzag: false, missing_value: u32::MAX,
+                missing_string: ".".into(), description: String::new(),
+            },
+            Field {
+                field: "AC".into(), alias: "ac".into(), ftype: FieldType::Integer,
+                multiplier: 1, zigzag: false, missing_value: u32::MAX,
+                missing_string: ".".into(), description: String::new(),
+            },
+        ];
+
+        let mut chunk = Chunk::empty();
+        chunk.var32s = vec![var32::encode(100, b"A", b"G").unwrap()];
+        // Two non-JsonBlob columns, in field order: AF then AC.
+        chunk.values = vec![vec![1234], vec![42]];
+        chunk.json_blobs = Some(vec![r#"{"k":1}"#.to_string()]);
+
+        let json = chunk.reconstruct_json(0, &fields, &[]);
+        assert!(json.contains("\"af\":"), "missing af in: {}", json);
+        assert!(json.contains("\"ac\":42"), "missing ac in: {}", json);
+        assert!(json.contains("\"blob\":{\"k\":1}"), "missing blob in: {}", json);
     }
 
     #[test]
